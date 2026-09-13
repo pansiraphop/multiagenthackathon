@@ -39,8 +39,13 @@ def _merge(intervals: list[tuple[datetime, datetime]]
     """Sort and merge overlapping or touching intervals."""
     if not intervals:
         return []
-    merged = [intervals[0]]
-    for start, end in sorted(intervals)[1:]:
+    # Seed from the SORTED list, not the caller's order. Seeding with
+    # intervals[0] while iterating the sorted tail silently drops the earliest
+    # block when the input isn't already sorted — and a dropped busy block
+    # means offering a cook slot in the middle of a meeting.
+    ordered = sorted(intervals)
+    merged = [ordered[0]]
+    for start, end in ordered[1:]:
         last_start, last_end = merged[-1]
         if start <= last_end:
             merged[-1] = (last_start, max(last_end, end))

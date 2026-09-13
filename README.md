@@ -346,6 +346,26 @@ source of truth (see `DATABASE.md`). The shared layer is done and tested:
 
 Run `python -m lib.normalize` and `python -m lib.schemas` to execute their self-tests.
 
+### Tests
+
+```bash
+python -m unittest discover -s tests -t .   # all unit suites, no network, <1s
+python -m lib.normalize                     # normalizer self-tests
+python -m lib.schemas                       # schema + validator self-tests
+python -m tests.test_pipeline               # LIVE integration, stages 1+2
+python -m tests.test_pipeline --keep        # ...and leave the rows for stage 3
+```
+
+The unit suites are stdlib `unittest`, deterministic, and hit nothing external — a
+failure means logic changed, not that an API was slow. `test_pipeline` is deliberately
+excluded from discovery because it spends real API calls and writes real rows.
+
+What `test_pipeline` proves is the **handoff**, not the stages. Each stage passing alone
+doesn't mean the planner can do anything: extraction has to produce recipes whose
+`est_time_minutes` fit inside the windows availability found, and the narrow windows have
+to actually exclude something — otherwise the fit constraint isn't doing any work and the
+demo has no story. It asserts both, and it cleans up after itself.
+
 **Build every ingredient row with `to_ingredient_row()`** — it is the only thing that
 guarantees all of the invariants at once. Verified against real reel captions, it handles
 unicode and mixed fractions (`1½`, `½`), ranges (`2-3` → 2.5, flagged approximate),
