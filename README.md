@@ -4,6 +4,8 @@
 
 Built for the Multi-App AI Agent Hackathon, 13 September 2026, by Pan and Shiven.
 
+DEMO VIDEO LINK: https://drive.google.com/file/d/1tMkjmp6MAXwjIGFC5CP5ML7WjtXVSFyJ/view?usp=sharing 
+
 ---
 
 ## 1. Project overview

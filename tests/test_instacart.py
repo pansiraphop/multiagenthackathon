@@ -70,7 +70,7 @@ class FallbackTests(unittest.TestCase):
 
         self.assertEqual(result["method"], "fallback_links")
         # App CTA opens the storefront; per-item search URLs stay in links.
-        self.assertEqual(result["cart_url"], "https://www.instacart.com/")
+        self.assertEqual(result["cart_url"], "https://www.instacart.com")
         self.assertEqual(
             result["links"],
             ["https://www.instacart.com/store/search/red%20onion%20%26%20lime"],

@@ -153,6 +153,19 @@ def _cart_state(page: Any) -> str | None:
     return None
 
 
+def _cart_count(page: Any) -> int | None:
+    """Parse the header badge ('Items in cart: 12'). None if unreadable."""
+    state = _cart_state(page) or ""
+    match = re.search(r"items?\s+in\s+cart:\s*(\d+)", state, re.I)
+    if match:
+        return int(match.group(1))
+    # Fallback: trailing lone number in the cart control text.
+    match = re.search(r"(\d+)\s*$", " ".join(state.split()))
+    if match:
+        return int(match.group(1))
+    return None
+
+
 def ensure_logged_in(page: Any) -> None:
     """Fail fast when the persistent Browserbase context lost its Instacart login."""
     if _any_visible(page, LOGIN_SELECTORS, timeout_ms=1200):
@@ -164,30 +177,34 @@ def ensure_logged_in(page: Any) -> None:
 
 
 def search_and_add_item(page: Any, item: dict) -> None:
-    """Search one ingredient, add the first result, and verify UI state changed."""
+    """Search one ingredient, add the first result, and verify the cart grew."""
     page.goto(search_url(item["ingredient_name"]), wait_until="domcontentloaded")
     browser_lib.dismiss_overlays(page)
     ensure_logged_in(page)
 
-    before = _cart_state(page)
+    before_count = _cart_count(page)
+    before_state = _cart_state(page)
     add = _first_match(page, ADD_BUTTON_SELECTORS)
     add.click()
+    page.wait_for_timeout(900)
 
-    def added() -> bool:
-        after = _cart_state(page)
-        if before is not None and after is not None and after != before:
-            return True
-        # Instacart commonly replaces Add with quantity controls after success.
-        try:
-            return add.count() == 0 or not add.is_visible()
-        except Exception:
-            return True
-
-    page.wait_for_timeout(500)
-    if not added():
+    # Only trust a real cart-badge increase. Button disappearance alone is a
+    # false positive (modals, navigation, stale locators) and was marking the
+    # DB as added_to_cart while Instacart stayed empty.
+    after_count = _cart_count(page)
+    after_state = _cart_state(page)
+    if before_count is not None and after_count is not None:
+        if after_count > before_count:
+            return
         raise RuntimeError(
-            f"Add click was not reflected in cart for {item['ingredient_name']}"
+            f"Add click did not grow the cart for {item['ingredient_name']} "
+            f"(was {before_count}, now {after_count})"
         )
+    if before_state and after_state and after_state != before_state:
+        return
+    raise RuntimeError(
+        f"Add click was not reflected in cart for {item['ingredient_name']}"
+    )
 
 
 def _slot_label_matches(label: str, start: datetime, end: datetime) -> bool:
@@ -408,6 +425,15 @@ def _browser_cart(
             )
             if ok:
                 added.append(item)
+                # Persist immediately so a killed session still resumes cleanly.
+                week_key = item.get("week_start_date") or config.week_start().isoformat()
+                if item.get("ingredient_name"):
+                    db.update_where(
+                        "shopping_list",
+                        {"resolution_status": config.CART_READY_STATUS},
+                        week_start_date=week_key,
+                        ingredient_name=item["ingredient_name"],
+                    )
                 log_eval(
                     STAGE,
                     str(item.get("id", item["ingredient_name"])),
@@ -624,12 +650,12 @@ def run(
         return order
 
     if order and not force:
+        pending = [
+            i for i in items
+            if i.get("resolution_status")
+            not in (config.CART_READY_STATUS, config.ORDERED_STATUS)
+        ]
         if order.get("method") in config.BROWSER_CART_METHODS:
-            pending = [
-                i for i in items
-                if i.get("resolution_status")
-                not in (config.CART_READY_STATUS, config.ORDERED_STATUS)
-            ]
             if not pending and not place_order_flag:
                 print(f"      already ordered this week: {order['item_count']} items "
                       f"in the cart - nothing to add (--force to rebuild)")
@@ -647,9 +673,17 @@ def run(
                       f"{len(items)} not yet added")
                 items = pending
         else:
-            # A links-only row means nothing was ever added to a real cart, so
-            # retrying the browser cannot duplicate anything.
-            print("      previous run produced links only - retrying the browser cart")
+            # Links-only (or mixed) rows: still skip anything already marked
+            # added_to_cart so a mid-run resume does not duplicate.
+            if not pending:
+                print(f"      shopping list already fully carted "
+                      f"({len(items)} items) - nothing to add")
+                if not dry_run:
+                    log_eval(STAGE, f"{week}:already-ordered", True)
+                return order
+            print(f"      previous run was links-only / incomplete - "
+                  f"Browserbase topping up {len(pending)} pending of {len(items)}")
+            items = pending
     elif order and force:
         print("      --force: re-adding every item (may duplicate cart contents)")
 
