@@ -70,10 +70,7 @@ def layout(title: str, body: str, *, current: str = "", bar: str = "") -> str:
 </div></header>
 <div class="wrap">
   {body}
-  <footer class="page">
-    <span>Recipes from your saved reels.</span>
-    <a href="/pantry">Pantry</a>
-  </footer>
+
 </div>
 {bar}
 <script src="/static/app.js"></script>
@@ -157,7 +154,7 @@ def week_page(week_start: date, meals: list[dict], order: dict | None,
         <span class="meta">{''.join(f'<span>{b}</span>' for b in bits)}</span>
         {f'<span class="meal-tags">{"".join(tags)}</span>' if tags else ''}
       </span>
-      <span class="chev" aria-hidden="true">›</span>
+      <svg class="chev" viewBox="0 0 16 16" aria-hidden="true" width="16" height="16"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </a>""")
 
     listing = (f'<div class="meals">{"".join(rows)}</div>' if rows else
@@ -172,9 +169,6 @@ def week_page(week_start: date, meals: list[dict], order: dict | None,
     body = f"""
   <p class="kicker">{week_start.day} {week_start:%b} – {ends.day} {ends:%b}</p>
   <h1>Your week</h1>
-  <p class="lede">Meals fitted around what's already on your calendar and what's
-  closest to going off in your fridge.</p>
-
   <div class="stats">
     <div><b>{len(meals)}</b><span>Meals</span></div>
     <div><b>{count}</b><span>To buy</span></div>
@@ -183,10 +177,7 @@ def week_page(week_start: date, meals: list[dict], order: dict | None,
 
   <div class="shell">
     <main>
-      <div class="section-head">
-        <h2>Scheduled</h2>
-        <span class="count">{len(meals)} meals</span>
-      </div>
+      <div class="section-head"><h2>Scheduled</h2></div>
       {listing}
     </main>
     <aside class="rail">{_shop_panel(order)}</aside>
@@ -219,19 +210,10 @@ def cook_page(meal: dict, order: dict | None, voice: dict) -> str:
     lead = advance_prep(recipe)
     if lead:
         begin = start - timedelta(minutes=lead)
-        notices.append(f"""
-  <div class="notice">
-    <strong>Start ahead</strong>
-    Needs {lead // 60} hours of marinating or chilling first — begin by
-    {begin:%A} at {begin:%H:%M}.
-  </div>""")
-    if recipe.get("provenance") == "reconstructed":
-        notices.append("""
-  <div class="notice">
-    <strong>Reconstructed recipe</strong>
-    The reel didn't include a full method, so this was rebuilt from the dish name
-    and a few reputable sources. Worth a read before you shop.
-  </div>""")
+        notices.append(
+            f'<div class="notice">Start {lead // 60}h ahead — begin by '
+            f'<b>{begin:%A} at {begin:%H:%M}</b>.</div>')
+
 
     items = []
     for index, ing in enumerate(recipe.get("ingredients", [])):
@@ -256,7 +238,7 @@ def cook_page(meal: dict, order: dict | None, voice: dict) -> str:
         for n, step in enumerate(recipe.get("steps") or [])
     )
 
-    reason = (f'<p class="lede" style="margin:16px 0 0">{esc(meal["score_reason"])}</p>'
+    reason = (f'<p class="why">{esc(meal["score_reason"])}</p>'
               if meal.get("score_reason") else "")
     reel = (f'<a href="{esc(recipe["source_url"])}" target="_blank" rel="noopener">'
             f'Watch the original reel</a>' if recipe.get("source_url") else "")
@@ -268,8 +250,6 @@ def cook_page(meal: dict, order: dict | None, voice: dict) -> str:
       <div class="panel-row"><span>Time needed</span><b>{attended} min</b></div>
     </div>
     <button class="btn" id="voice" aria-disabled="true" disabled>Guided cooking</button>
-    <p class="tiny muted" style="margin:10px 0 0">Hands-free voice guidance is
-    coming next.</p>
   </div>"""
 
     body = f"""
@@ -277,6 +257,7 @@ def cook_page(meal: dict, order: dict | None, voice: dict) -> str:
     <p class="kicker">{start:%A} at {start:%H:%M}</p>
     <h1>{esc(recipe.get('title') or 'Untitled')}</h1>
     <div class="meta">{''.join(f'<span>{b}</span>' for b in bits)}</div>
+    {f'<div class="rtags">{"".join(_tags(recipe))}</div>' if _tags(recipe) else ''}
   </div>
 
   <div class="shell">
@@ -315,7 +296,7 @@ def cook_page(meal: dict, order: dict | None, voice: dict) -> str:
 <div class="bar"><div class="inner">
   <button class="btn" id="voice-mobile" aria-disabled="true" disabled>Guided cooking</button>
   {secondary}
-  <p class="note">Hands-free voice guidance is coming next.</p>
+
 </div></div>
 <script id="cook-context" type="application/json">{json.dumps(voice)}</script>"""
 
@@ -391,9 +372,6 @@ def pantry_page(items: list[dict], today: date, usable: set[str]) -> str:
     body = f"""
   <p class="kicker">Your kitchen</p>
   <h1>Pantry</h1>
-  <p class="lede">What you already have. The planner reaches for whatever is
-  closest to going off, and the shopping list only covers the gap.</p>
-
   <div class="stats">
     <div><b>{len(items)}</b><span>Items</span></div>
     <div class="accent"><b>{len(groups['Use soon'])}</b><span>Use soon</span></div>
@@ -429,10 +407,7 @@ def pantry_page(items: list[dict], today: date, usable: set[str]) -> str:
           <button class="btn" type="submit">Add to pantry</button>
         </form>
       </div>
-      <div class="notice notice-green">
-        <strong>Coming next</strong>
-        Tell the Instagram agent what you bought and it will fill this in for you.
-      </div>
+
     </aside>
   </div>
 """

@@ -121,6 +121,8 @@ h3 {
   margin: 0 0 10px;
 }
 .lede { color: var(--ink-2); margin: 0 0 26px; max-width: 54ch; font-size: 0.9375rem; }
+.why { color: var(--ink-2); font-size: 0.875rem; line-height: 1.55;
+       margin: 18px 0 0; max-width: 58ch; }
 .muted { color: var(--ink-2); }
 .tiny { font-size: 0.8125rem; line-height: 1.5; }
 
@@ -152,7 +154,7 @@ a:hover { text-decoration-color: currentColor; }
 
 .section-head {
   display: flex; align-items: baseline; justify-content: space-between;
-  gap: 12px; padding-bottom: 10px; margin: 30px 0 0;
+  gap: 12px; padding-bottom: 10px; margin: 34px 0 0;
   border-bottom: 1px solid var(--line);
 }
 .section-head:first-child { margin-top: 0; }
@@ -203,7 +205,8 @@ a:hover { text-decoration-color: currentColor; }
 }
 .meal-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
 
-.chev { flex: 0 0 auto; color: var(--ink-3); font-size: 1rem; }
+.chev { flex: 0 0 auto; color: #C4C4C4; }
+.meal:hover .chev { color: var(--ink-3); }
 
 /* --- tags ---------------------------------------------------------------- */
 
@@ -237,18 +240,13 @@ a:hover { text-decoration-color: currentColor; }
 /* --- notices ------------------------------------------------------------- */
 
 .notice {
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--amber);
-  border-radius: 0 var(--r) var(--r) 0;
-  padding: 12px 14px;
-  margin: 16px 0;
+  border-left: 2px solid var(--amber);
+  padding: 2px 0 2px 12px;
+  margin: 18px 0 0;
   font-size: 0.875rem; line-height: 1.5;
   color: var(--ink-2);
-  background: var(--bg);
 }
-.notice strong { display: block; color: var(--ink); font-size: 0.875rem;
-                 font-weight: 600; letter-spacing: -0.012em; margin-bottom: 2px; }
-.notice-green { border-left-color: var(--accent); }
+.notice b { color: var(--ink); font-weight: 600; }
 
 /* --- checklists ---------------------------------------------------------- */
 
@@ -309,8 +307,9 @@ a:hover { text-decoration-color: currentColor; }
 
 /* --- recipe header ------------------------------------------------------- */
 
-.rhead { padding-bottom: 18px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
-.rhead .meta { margin-top: 10px; font-size: 0.875rem; }
+.rhead { padding-bottom: 18px; border-bottom: 1px solid var(--line); margin-bottom: 2px; }
+.rhead .meta { margin-top: 9px; font-size: 0.875rem; }
+.rtags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 11px; }
 
 /* --- forms --------------------------------------------------------------- */
 
@@ -377,11 +376,7 @@ input:focus-visible, select:focus-visible {
   border: 1px dashed var(--line); border-radius: var(--r);
   padding: 36px 20px; text-align: center; color: var(--ink-2);
 }
-footer.page {
-  margin-block: 44px 32px; padding-top: 16px; border-top: 1px solid var(--line);
-  font-size: 0.8125rem; color: var(--ink-3);
-  display: flex; flex-wrap: wrap; gap: 6px 16px;
-}
+.wrap { padding-bottom: 56px; }
 
 .shell { display: grid; grid-template-columns: minmax(0, 1fr); gap: 26px; }
 
