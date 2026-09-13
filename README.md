@@ -11,7 +11,12 @@ already in it.
 Built for the **Multi-App AI Agent Hackathon** (Sunday, September 13, 2026).
 Build closes 4:00 PM PT.
 
-**Apps it acts across:** Instagram · Google Calendar (read + write) · Instacart · ElevenLabs
+**Apps it acts across:** Instagram · Google Calendar (read + write) · Instacart
+· ElevenLabs
+
+**The whole thing is reachable from an Instagram DM.** Send a reel and it becomes a
+recipe; send a message and the concierge agent answers, plans, reschedules or shops —
+see §4b. · ElevenLabs
 
 This README is the shared spec. It sets direction and fixes the contracts between stages;
 implementation details get filled in as we build. If you change a contract, change it
@@ -22,8 +27,14 @@ here first and tell the other person.
 ## 1. Pipeline
 
 ```
-Instagram reel ──▶ [1 extract] ──▶ recipes + ingredients
-                                          │
+Instagram DM ──▶ webhook.py ──┬── a reel?            ──▶ [1 extract]
+                              ├── an answer to 5b?   ──▶ apply it
+                              └── anything else?     ──▶ [4b concierge]
+                                                             │
+                                        the concierge's tools are the stages below
+
+                   [1 extract] ──▶ recipes + ingredients
+
 Google Calendar ──▶ [2 availability] ──▶ cook_slots
        (read)                              │
                                            ▼
@@ -101,7 +112,13 @@ they're worth agreeing on up front.
    everywhere.
 9. **Nothing named `calendar.py`** — it shadows the stdlib module and breaks
    `google-api-python-client` imports. Use `calendar_sync.py`.
-10. **The planner fits on `total_time_minutes`, never `est_time_minutes`.** A recipe has
+10. **Rewriting `cook_slots` detaches the plan.** Availability is delete-then-insert
+    and `meal_plan.cook_slot_id` is `ON DELETE SET NULL`, so a second run silently
+    orphans every planned meal and marks every taken window free again. `run_week` calls
+    availability on every run, so this happened on the second pass every time with no
+    error. `availability._relink_plan()` reattaches meals by start time and reports any
+    whose window genuinely no longer exists. Don't remove it.
+11. **The planner fits on `total_time_minutes`, never `est_time_minutes`.** A recipe has
     three different times and only one of them books an evening: active hands-on work,
     the **attended** span you must be home for (active plus braising, roasting, proving),
     and advance prep you need not be present for (marinating, chilling, rising). Fitting
@@ -131,6 +148,7 @@ stages depend on. Add whatever else you need.
 | `shopping_list` | `week_start_date`, `ingredient_name`, `quantity_needed`, `unit`, `resolution_status` | 4, 5 |
 | `instacart_orders` | `week_start_date`, `cart_url`, `item_count`, `unresolved_item_count`, `delivery_window_start`, `delivery_window_end`, `delivery_event_id`, `method` | 5, 6 |
 | `followups` | `week_start_date`, `kind`, `meal_plan_id`, `recipient_id`, `channel`, `question`, `options` (jsonb), `status`, `reply_text`, `chosen_key`, `resolution`, `round` | 5b |
+| `conversations` | `sender_id`, `role` (user/assistant), `content`, `created_at` | 4b |
 | `eval_log` | `stage`, `input_ref`, `success`, `retry_count`, `duration_ms`, `error_message` | all |
 
 `shopping_list.resolution_status` is `pending` → `added_to_cart` (in this week's cart, never
@@ -406,6 +424,102 @@ delivery window. Explicit `timeZone`, skip rows that already have an event id.
 
 ---
 
+## 4b. The concierge — the whole system from a DM
+
+`stages/concierge.py`. Send a reel and ingestion takes it. Send **text** and this runs:
+the model picks tools, the tools are the pipeline stages, the reply goes back as a DM.
+
+```bash
+python -m stages.concierge --chat                    # interactive
+python -m stages.concierge --say "plan my week"      # one message
+python -m stages.concierge --history                 # what it remembers
+python -m stages.concierge --forget                  # clear the thread
+```
+
+The CLI runs the **identical code path** the webhook uses, so testing it is honest and it
+is demoable with Instagram out of the loop.
+
+### Why this was cheap to build
+
+Every stage was already a plain function over database rows, so the tools call the same
+`plan.run` and `shopping_list.run` the CLI calls. Nothing is reimplemented — there is one
+implementation of each behaviour and the agent cannot drift from it. The
+database-as-contract decision that let two people build in parallel is the same thing
+that made this a thin layer rather than a rewrite.
+
+### The 14 tools
+
+| Group | Tools |
+|---|---|
+| Pantry | `get_pantry`, `add_pantry_items`, `remove_pantry_item` |
+| What's available | `get_recipes`, `get_free_windows`, `get_week_plan`, `whats_for_dinner` |
+| Changing the plan | `plan_week`, `schedule_recipe`, `move_meal`, `remove_meal` |
+| Downstream | `get_shopping_list`, `build_shopping_list`, `sync_calendar` |
+
+`plan_week` is the automatic path — "sort out my week". `schedule_recipe`, `move_meal`
+and `remove_meal` are the manual one: *"make the katsu on Saturday"*, *"move the wings to
+Thursday"*, *"drop the ragu"*.
+
+**The manual path goes through the same fit rules as the planner** — attended time plus
+buffer must fit the window, advance prep must be startable — so a hand-placed meal can't
+produce a week the automatic planner would have rejected. It says why when it refuses:
+*"needs 60 min but that window is only 40"*.
+
+Recipe matching takes what people actually type: exact, then substring, then word overlap,
+so *"the short rib thing"* finds *Slow Braised Short Rib Ragu*. Nobody retypes a title.
+
+### Two rules it holds to
+
+- **`plan_week` won't overwrite an existing plan** without `replace_existing=true`. It's
+  the one destructive thing the agent can do, so it asks.
+- **Changing the plan makes the shopping list stale**, and it says so rather than leaving
+  you with a cart that no longer matches.
+
+### Conversation
+
+Turns live in `conversations`, twelve of them — enough to hold a thread without resending
+a transcript. Verified: a second turn recalled a fact from the first with no tool call.
+
+A model failure returns a plain sentence rather than silence. An agent that goes quiet in
+a DM reads as broken.
+
+### Routing — the part that failed silently once
+
+`webhook.py` splits inbound text two ways:
+
+- stage 5b has an **open question** for this sender → `followup.apply_reply`
+- otherwise → `concierge.handle_dm`
+
+The open-question check filters `followups.status` on `OPEN_STATUS`, which is **`"sent"`,
+not `"open"`**. It was hardcoded wrong at first and never matched, so every answer to a
+follow-up would have been treated as chat and the loop would never have closed — with no
+error anywhere, because both handlers swallow exceptions. Import the constant; don't
+retype it. `tests/test_webhook_routing.py` pins this down through the real HTTP endpoint.
+
+### Before pointing ngrok at it
+
+```bash
+INSTAGRAM_ACCESS_TOKEN=...   # without it, replies print to stdout and never send
+META_VERIFY_TOKEN=...        # without it, Meta's subscription handshake 403s
+APP_BASE_URL=https://<ngrok>.ngrok.io
+```
+
+**`send_dm` fails soft.** With no token it prints the reply to the console and returns
+`Delivery(False, "console")` — the agent looks like it's working perfectly in the logs
+while nothing reaches Instagram. Check it explicitly rather than inferring from a clean
+log:
+
+```bash
+python -c "from lib import instagram; print(instagram.send_dm('<igsid>', 'test'))"
+```
+
+Anything other than `console` means the chain works.
+
+`APP_BASE_URL` is baked into calendar descriptions **at write time**, so set it before
+running stage 6 — or `calendar_sync --clear` and re-run afterwards.
+
+---
+
 ## 5. Supporting scripts
 
 - **`run_week.py`** — runs the pipeline in order and **prints its decisions as it goes.**
@@ -564,6 +678,7 @@ source of truth (see `DATABASE.md`). The shared layer is done and tested:
 | `lib/google_auth.py` | OAuth with one read+write scope; re-consents if a cached token is too narrow |
 | `lib/voice.py` | ElevenLabs TTS: `synthesize()`, `resolve_voice()`, chunking under the char limit |
 | `web/views.py` | Page rendering as pure functions — testable without a browser |
+| `stages/concierge.py` | The DM agent: 14 tools over the stages, plus the CLI to drive it |
 | `lib/ingest.py` | Reel payload parsing, caption-first local Whisper fallback, deduplicated pending-recipe write |
 | `lib/instagram.py` | Outbound DMs with quick replies, console fallback tier, reply parsing, `match_option()` |
 | `lib/source.py` | Transcript reliability score + caption/transcript SOURCE assembly for extraction |
@@ -572,8 +687,8 @@ source of truth (see `DATABASE.md`). The shared layer is done and tested:
 | `stages/extract.py` | Agent entrypoint: list/rank pending reels, extract caption±transcript into recipes |
 
 Stages built: **1** `stages/extract.py`, **2** `availability.py`, **3** `plan.py`,
-**4** `shopping_list.py`, **5** `instacart.py`, **5b** `followup.py`,
-**6** `calendar_sync.py`, **7** `web/` + `voiceover.py`.
+**4** `shopping_list.py`, **4b** `concierge.py`, **5** `instacart.py`,
+**5b** `followup.py`, **6** `calendar_sync.py`, **7** `web/` + `voiceover.py`.
 `run_week.py` runs them in order (`--voiceover` for stage 7 narration). Seeds:
 `seed_pantry.py`, `seed_calendar.py`.
 
@@ -593,6 +708,8 @@ python -m stages.extract --best 1           # LIVE extraction of top pending ree
 python -m tests.test_pipeline               # LIVE integration, stages 1-4
 python -m tests.test_pipeline --keep        # ...and leave the rows in place
 python -m tests.test_pipeline --fixtures    # recorded recipes, no model spend
+python -m tests.test_concierge             # the DM agent's tools and memory
+python -m tests.test_webhook_routing       # which handler an inbound DM reaches
 ```
 
 The unit suites are stdlib `unittest`, deterministic, and hit nothing external — a
