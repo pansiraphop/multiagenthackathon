@@ -7,7 +7,7 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 -- CreateTable
 CREATE TABLE "recipes" (
     "id" UUID NOT NULL DEFAULT gen_random_uuid(),
-    "source_url" TEXT NOT NULL,
+    "source_url" TEXT,
     "title" TEXT,
     "cuisine" TEXT,
     "est_time_minutes" INTEGER,
@@ -99,9 +99,10 @@ CREATE TABLE "shopping_list" (
 CREATE TABLE "instacart_orders" (
     "id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "week_start_date" DATE NOT NULL,
-    "cart_url" TEXT NOT NULL,
+    "cart_url" TEXT,
     "item_count" INTEGER NOT NULL DEFAULT 0,
-    "method" TEXT NOT NULL,
+    "unresolved_item_count" INTEGER NOT NULL DEFAULT 0,
+    "method" TEXT,
     "delivery_window_start" TIMESTAMPTZ,
     "delivery_window_end" TIMESTAMPTZ,
     "delivery_event_id" TEXT,
@@ -115,7 +116,7 @@ CREATE TABLE "instacart_orders" (
 CREATE TABLE "eval_log" (
     "id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "stage" TEXT NOT NULL,
-    "input_ref" TEXT NOT NULL,
+    "input_ref" TEXT,
     "success" BOOLEAN NOT NULL,
     "retry_count" INTEGER NOT NULL DEFAULT 0,
     "duration_ms" INTEGER,

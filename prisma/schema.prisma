@@ -35,7 +35,7 @@ datasource db {
 /// One Instagram reel turned into a recipe.
 model Recipe {
   id     String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  source_url String
+  source_url String?
 
   // Populated by extraction; a freshly-created row is `extraction_status =
   // 'pending'` and therefore has none of these yet.
@@ -179,9 +179,10 @@ model ShoppingList {
 model InstacartOrder {
   id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   week_start_date DateTime @unique @db.Date
-  cart_url        String
+  cart_url        String?
   item_count      Int      @default(0)
-  method          String
+  unresolved_item_count Int @default(0)
+  method          String?
 
   delivery_window_start DateTime? @db.Timestamptz
   delivery_window_end   DateTime? @db.Timestamptz
@@ -201,7 +202,7 @@ model InstacartOrder {
 model EvalLog {
   id            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   stage         String
-  input_ref     String
+  input_ref     String?
   success       Boolean
   retry_count   Int     @default(0)
   duration_ms   Int?
