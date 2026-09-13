@@ -16,6 +16,10 @@ Designed so the story lands:
 Names go through normalize_name() on the way in. If the pantry says "Tomatoes"
 and a recipe says "tomato", nothing matches and the whole thing quietly fails.
 
+Use the name a RECIPE would say, not the one on the packet. "double cream" and
+"udon noodles" normalize to "double cream" and "udon noodle", which never match
+the "cream" and "udon" that extraction produces -- a silent miss, not an error.
+
     python -m seed.seed_pantry            # replace the pantry
     python -m seed.seed_pantry --list     # show what's there
     python -m seed.seed_pantry --clear    # empty it
@@ -40,7 +44,7 @@ PANTRY = [
 
     # --- this week ------------------------------------------------------
     ("paneer", 250, "g", 4),
-    ("double cream", 200, "ml", 5),
+    ("cream", 200, "ml", 5),
     ("celery", 1, "unit", 8),
     ("carrots", 4, "unit", 10),
 
@@ -49,7 +53,7 @@ PANTRY = [
     ("butter", 250, "g", 20),
     ("onions", 5, "unit", 21),
     ("garlic", 12, "unit", 30),
-    ("udon noodles", 400, "g", 60),
+    ("udon", 400, "g", 60),
 
     # --- already gone: must be ignored, not treated as urgent -----------
     ("greek yoghurt", 200, "g", -3),

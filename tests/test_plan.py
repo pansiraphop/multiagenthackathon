@@ -11,17 +11,22 @@ from __future__ import annotations
 
 import unittest
 from datetime import date, datetime, timedelta
+from unittest.mock import patch
 
 import config
+from lib.llm import LLMFailure
+from lib.schemas import MealReasons
 from stages.availability import _at
 from stages.plan import (
     _template_reason,
+    add_reasons,
     assign,
     base_score,
     completeness,
     expiring_ingredients,
     expiry_urgency,
     pantry_overlap,
+    usable_pantry,
 )
 
 MONDAY = date(2026, 9, 14)
@@ -320,6 +325,123 @@ class ExpiringIngredients(unittest.TestCase):
         r = recipe(names=("spinach", "rice", "flour"))
         found = expiring_ingredients(r, pantry(spinach=2, rice=None, flour=30), TODAY)
         self.assertEqual([name for name, _ in found], ["spinach"])
+
+
+class UsablePantry(unittest.TestCase):
+    """Expired stock is gone, not urgent. Counting it would be the worst of
+    both: an inflated urgency score AND the item missing from the cart."""
+
+    ROWS = [
+        {"ingredient_name": "spinach", "quantity": 400, "unit": "g",
+         "expiry_date": "2026-09-15"},
+        {"ingredient_name": "greek yoghurt", "quantity": 200, "unit": "g",
+         "expiry_date": "2026-09-10"},                       # expired
+        {"ingredient_name": "rice", "quantity": 2, "unit": "kg",
+         "expiry_date": None},                                # staple
+        {"ingredient_name": "milk", "quantity": 1, "unit": "l",
+         "expiry_date": "2026-09-13"},                        # expires today
+    ]
+
+    def test_expired_excluded(self) -> None:
+        with patch("lib.db.select", return_value=self.ROWS):
+            store = usable_pantry(today=TODAY)
+        self.assertNotIn("greek yoghurt", store)
+
+    def test_staples_and_future_kept(self) -> None:
+        with patch("lib.db.select", return_value=self.ROWS):
+            store = usable_pantry(today=TODAY)
+        self.assertIn("rice", store)
+        self.assertIn("spinach", store)
+
+    def test_expiring_today_is_still_usable(self) -> None:
+        """Today's milk is exactly the thing you should cook tonight."""
+        with patch("lib.db.select", return_value=self.ROWS):
+            store = usable_pantry(today=TODAY)
+        self.assertIn("milk", store)
+
+    def test_keyed_by_normalized_name(self) -> None:
+        with patch("lib.db.select", return_value=self.ROWS):
+            store = usable_pantry(today=TODAY)
+        for key in store:
+            self.assertEqual(key, key.lower())
+
+    def test_empty_pantry_is_fine(self) -> None:
+        with patch("lib.db.select", return_value=[]):
+            self.assertEqual(usable_pantry(today=TODAY), {})
+
+
+class ScoreReasons(unittest.TestCase):
+    """score_reason is cosmetic. It must never block or alter a plan."""
+
+    def items(self, count=2):
+        built = []
+        for n in range(count):
+            built.append({
+                "recipe": recipe(rid=f"r{n}", title=f"Dish {n}", names=("spinach",)),
+                "slot": slot(f"s{n}", day_offset=n),
+                "planned_start_time": slot(f"s{n}", day_offset=n)["slot_start"],
+            })
+        return built
+
+    def test_templates_applied_when_llm_disabled(self) -> None:
+        items = self.items()
+        add_reasons(items, pantry(spinach=2), use_llm=False)
+        for item in items:
+            self.assertTrue(item["score_reason"].strip())
+            self.assertIn("spinach", item["score_reason"])
+
+    def test_llm_disabled_makes_no_call(self) -> None:
+        with patch("stages.plan.call_llm_structured") as call:
+            add_reasons(self.items(), pantry(spinach=2), use_llm=False)
+        call.assert_not_called()
+
+    def test_one_batched_call_for_the_whole_week(self) -> None:
+        """Five meals must be one request, not five."""
+        items = self.items(5)
+        with patch("stages.plan.call_llm_structured",
+                   return_value=MealReasons(reasons=[f"why {n}" for n in range(5)])
+                   ) as call:
+            add_reasons(items, pantry(spinach=2))
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual([i["score_reason"] for i in items],
+                         [f"why {n}" for n in range(5)])
+
+    def test_model_failure_leaves_templates_intact(self) -> None:
+        items = self.items()
+        with patch("stages.plan.call_llm_structured",
+                   side_effect=LLMFailure("boom")):
+            add_reasons(items, pantry(spinach=2))
+        for item in items:
+            self.assertTrue(item["score_reason"].strip(),
+                            "a failed narration must not leave an empty reason")
+
+    def test_blank_reason_falls_back_to_template(self) -> None:
+        items = self.items(2)
+        with patch("stages.plan.call_llm_structured",
+                   return_value=MealReasons(reasons=["", "   "])):
+            add_reasons(items, pantry(spinach=2))
+        for item in items:
+            self.assertTrue(item["score_reason"].strip())
+
+    def test_wrong_count_is_rejected_by_the_validator(self) -> None:
+        """Two meals, three reasons: the validator must catch the mismatch."""
+        captured = {}
+
+        def fake(prompt, model, **kwargs):
+            captured["validate"] = kwargs["validate"]
+            return MealReasons(reasons=["a", "b"])
+
+        with patch("stages.plan.call_llm_structured", side_effect=fake):
+            add_reasons(self.items(2), pantry(spinach=2))
+
+        validate = captured["validate"]
+        self.assertEqual(validate(MealReasons(reasons=["a", "b"])), [])
+        self.assertTrue(validate(MealReasons(reasons=["a", "b", "c"])))
+
+    def test_no_assignments_makes_no_call(self) -> None:
+        with patch("stages.plan.call_llm_structured") as call:
+            add_reasons([], pantry(), use_llm=True)
+        call.assert_not_called()
 
 
 if __name__ == "__main__":

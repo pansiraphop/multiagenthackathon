@@ -1,4 +1,4 @@
-"""Integration test — stages 1 and 2 together, against live services.
+"""Integration test — stages 1 to 3 together, against live services.
 
 Unlike the unit suites this costs real API calls and writes real rows, so it
 is never picked up by `unittest discover`. Run it deliberately:
@@ -7,10 +7,12 @@ is never picked up by `unittest discover`. Run it deliberately:
     python -m tests.test_pipeline --keep     # leave the rows for stage 3 work
     python -m tests.test_pipeline --offline  # skip Google, use fallback slots
 
-What it actually proves is the handoff. Each stage passing on its own doesn't
-mean the planner can do anything: extraction has to produce recipes whose
+What it actually proves is the handoffs. Each stage passing on its own doesn't
+mean the next one can do anything: extraction has to produce recipes whose
 ATTENDED time (total_time_minutes, not active) fits inside the windows
-availability found. That join is the contract, and it's what this checks.
+availability found, and the planner has to turn that into a schedule where
+every block is the right length and no window is double-booked. Those joins
+are the contract, and they're what this checks.
 """
 
 from __future__ import annotations
@@ -38,7 +40,8 @@ from lib.schemas import (
     needs_reconstruction,
     validate_recipe,
 )
-from stages import availability
+from stages import availability, plan
+from seed import seed_pantry
 
 INPUT_REF = "integration-test"
 
@@ -69,6 +72,76 @@ Next day dredge in cornstarch and fry 8 minutes a side. Serves 2.""", "marinade"
 Sear the beef. Soften the veg. Deglaze with wine, add tomatoes and bay.
 Braise 2 hours. Shred and toss with pappardelle. Serves 4.""", "long"),
 ]
+
+
+# Recorded from real extraction runs. Used by --fixtures so stages 2 and 3 stay
+# testable when the model API is unavailable (expired key, no credits, outage).
+# Ingredient names are deliberately the ones extraction actually produces, so
+# the pantry-matching path is exercised exactly as it would be live.
+FIXTURE_RECIPES = [
+    dict(label="short", title="10 Minute Garlic Butter Noodles", cuisine="japanese",
+         active=10, attended=10, lead=0, servings=2,
+         steps=["Boil the noodles.", "Brown the butter with garlic.",
+                "Toss with soy and chilli."],
+         ingredients=[("udon", 200, "g"), ("butter", 3, "tbsp"),
+                      ("garlic", 4, "unit"), ("soy sauce", 2, "tbsp"),
+                      ("chilli flake", 1, "tsp"), ("spring onion", 1, "unit")]),
+
+    dict(label="medium", title="Weeknight Palak Paneer", cuisine="indian",
+         active=35, attended=35, lead=0, servings=4,
+         steps=["Blanch and blitz the spinach.", "Fry the paneer until golden.",
+                "Bloom the spices.", "Add the puree.", "Finish with cream."],
+         ingredients=[("spinach", 400, "g"), ("paneer", 250, "g"),
+                      ("onion", 2, "unit"), ("garlic", 3, "unit"),
+                      ("ginger", 1, "unit"), ("garam masala", 1, "tsp"),
+                      ("turmeric", 0.5, "tsp"), ("ghee", 2, "tbsp"),
+                      ("cream", 100, "ml")]),
+
+    dict(label="marinade", title="Korean Fried Chicken Wings", cuisine="korean",
+         active=20, attended=30, lead=720, servings=2,
+         steps=["Marinate the wings overnight.", "Dredge in cornstarch.",
+                "Fry eight minutes a side."],
+         ingredients=[("chicken wing", 453.59, "g"), ("gochujang", 3, "tbsp"),
+                      ("soy sauce", 2, "tbsp"), ("honey", 1, "tbsp"),
+                      ("garlic", 4, "unit"), ("rice vinegar", 1, "tbsp"),
+                      ("cornstarch", 100, "g")]),
+
+    dict(label="long", title="Slow Braised Short Rib Ragu", cuisine="italian",
+         active=30, attended=150, lead=0, servings=4,
+         steps=["Sear the beef.", "Soften the vegetables.", "Deglaze with wine.",
+                "Braise for two hours.", "Shred and toss with pappardelle."],
+         ingredients=[("beef short rib", 680, "g"), ("carrot", 2, "unit"),
+                      ("celery", 2, "unit"), ("onion", 1, "unit"),
+                      ("tinned tomato", 400, "g"), ("red wine", 250, "ml"),
+                      ("bay leaf", 2, "unit"), ("olive oil", 2, "tbsp")]),
+]
+
+
+def insert_fixtures() -> list[dict]:
+    """Write the recorded recipes straight to the database, no model call."""
+    print("[1/6] extraction  (FIXTURES - no model call)")
+    written = []
+    for spec in FIXTURE_RECIPES:
+        row = db.insert_recipe(
+            raw_caption=f"fixture: {spec['title']}",
+            source_url=f"https://instagram.com/reel/{INPUT_REF}-{spec['label']}",
+            title=spec["title"], cuisine=spec["cuisine"],
+            est_time_minutes=spec["active"],
+            total_time_minutes=spec["attended"],
+            advance_prep_minutes=spec["lead"],
+            servings=spec["servings"], steps=spec["steps"],
+            extraction_status="success", provenance="transcript",
+            source_sufficiency="complete",
+        )
+        rows = dedupe_ingredients([
+            to_ingredient_row(name, qty, unit)
+            for name, qty, unit in spec["ingredients"]
+        ])
+        db.insert_ingredients(row["id"], rows)
+        print(f"      {spec['title'][:32]:32s} active {spec['active']:>3} "
+              f"attended {spec['attended']:>3}  {len(rows)} ingr")
+        written.append(row)
+    return written
 
 
 def fail(message: str) -> None:
@@ -173,7 +246,86 @@ def run_stage_2(offline: bool) -> list[dict]:
     return slots
 
 
-def check_handoff(recipes: list[dict], slots: list[dict]) -> None:
+def run_stage_3(use_llm: bool = True) -> list[dict]:
+    rows = plan.run(use_llm=use_llm)
+    if not rows:
+        fail("planner produced no meal_plan rows")
+    return rows
+
+
+def check_plan_invariants(meals: list[dict], slots: list[dict],
+                          recipes: list[dict]) -> None:
+    """Whatever the planner wrote has to be safe for calendar_sync to consume."""
+    print("[2+3] plan invariants")
+
+    by_slot = {s["id"]: s for s in slots}
+    by_recipe = {r["id"]: r for r in recipes}
+    pantry = plan.usable_pantry()
+
+    seen_slots, seen_recipes = set(), set()
+    for row in meals:
+        title = (by_recipe.get(row["recipe_id"]) or {}).get("title", row["recipe_id"])
+
+        if row["cook_slot_id"] not in by_slot:
+            fail(f"{title}: cook_slot_id points at no slot from this week")
+        if row["cook_slot_id"] in seen_slots:
+            fail(f"{title}: window double-booked")
+        if row["recipe_id"] in seen_recipes:
+            fail(f"{title}: planned twice in one week")
+        seen_slots.add(row["cook_slot_id"])
+        seen_recipes.add(row["recipe_id"])
+
+        start = datetime.fromisoformat(row["planned_start_time"])
+        end = datetime.fromisoformat(row["planned_end_time"])
+        block = (end - start).total_seconds() / 60
+        expected = attended_minutes(by_recipe[row["recipe_id"]])
+        if block != expected:
+            fail(f"{title}: calendar block is {block:.0f} min but the recipe needs "
+                 f"{expected} attended - the event would end mid-cook")
+
+        window = by_slot[row["cook_slot_id"]]
+        if start.isoformat() != window["slot_start"]:
+            fail(f"{title}: does not start when its window does")
+        if expected + config.SLOT_BUFFER_MINUTES > window["duration_minutes"]:
+            fail(f"{title}: needs {expected} min in a "
+                 f"{window['duration_minutes']} min window")
+
+        if not (row.get("score_reason") or "").strip():
+            fail(f"{title}: empty score_reason - the calendar invite has no 'why'")
+        if row["status"] != "planned":
+            fail(f"{title}: status is {row['status']}, expected 'planned'")
+
+    # The flags calendar_sync and the re-plan loop both rely on.
+    assigned = {s["id"] for s in db.select("cook_slots", "*",
+                                           week_start_date=config.week_start().isoformat())
+                if s["assigned"]}
+    if assigned != seen_slots:
+        fail(f"cook_slots.assigned is out of step with meal_plan "
+             f"({len(assigned)} flagged, {len(seen_slots)} planned)")
+
+    print(f"      {len(meals)} meals, no double-booking, every block the right length")
+
+    # The demo claim: urgent food gets cooked first.
+    ordered = sorted(meals, key=lambda r: r["planned_start_time"])
+    first = by_recipe[ordered[0]["recipe_id"]]
+    urgent_anywhere = [r for r in recipes if plan.expiring_ingredients(r, pantry)]
+    if urgent_anywhere:
+        soon = plan.expiring_ingredients(first, pantry)
+        if soon:
+            name, days = soon[0]
+            print(f"      earliest meal rescues '{name}' ({days}d left) - "
+                  f"expiry urgency is driving the order")
+        else:
+            print(f"      [warn] the earliest meal uses nothing expiring, but "
+                  f"{len(urgent_anywhere)} recipe(s) do - check the weights")
+
+    stages_logged = {row["stage"] for row in db.select("eval_log")}
+    if "planning" not in stages_logged:
+        fail("eval_log has no 'planning' rows")
+
+
+def check_handoff(recipes: list[dict], slots: list[dict],
+                  expect_extraction: bool = True) -> None:
     """The actual integration claim: the planner has something to work with."""
     print("[1+2] handoff")
 
@@ -221,10 +373,12 @@ def check_handoff(recipes: list[dict], slots: list[dict]) -> None:
 
     # Both stages must have left an audit trail; it's a graded deliverable.
     stages_logged = {row["stage"] for row in db.select("eval_log")}
-    for required in ("extraction", "availability"):
-        if required not in stages_logged:
-            fail(f"eval_log has no '{required}' rows")
-    print(f"      eval_log covers: {', '.join(sorted(stages_logged))}")
+    required = ["availability"] + (["extraction"] if expect_extraction else [])
+    for stage in required:
+        if stage not in stages_logged:
+            fail(f"eval_log has no '{stage}' rows")
+    note = "" if expect_extraction else "  (fixtures: no extraction rows expected)"
+    print(f"      eval_log covers: {', '.join(sorted(stages_logged))}{note}")
 
 
 def show_sample(recipes: list[dict]) -> None:
@@ -245,12 +399,14 @@ def show_sample(recipes: list[dict]) -> None:
 
 
 def cleanup() -> None:
+    db.delete_where("meal_plan", week_start_date=config.week_start().isoformat())
     for recipe in db.select("recipes"):
         if INPUT_REF in (recipe.get("source_url") or ""):
             db.delete_where("recipes", id=recipe["id"])   # cascades ingredients
     db.delete_where("cook_slots", week_start_date=config.week_start().isoformat())
     db.delete_where("eval_log", input_ref=INPUT_REF)
     db.delete_where("eval_log", stage="availability")
+    db.delete_where("eval_log", stage="planning")
     print("  cleaned up test rows")
 
 
@@ -260,21 +416,33 @@ def main() -> None:
                         help="leave the rows in place for stage 3 work")
     parser.add_argument("--offline", action="store_true",
                         help="skip Google and use fallback slots")
+    parser.add_argument("--fixtures", action="store_true",
+                        help="use recorded recipes instead of calling the model; "
+                             "keeps stages 2 and 3 testable with no API access")
     args = parser.parse_args()
 
     started = datetime.now()
-    print(f"integration: stages 1 + 2, week of {config.week_start()}")
+    mode = " (fixtures)" if args.fixtures else ""
+    print(f"integration: stages 1-3{mode}, week of {config.week_start()}")
     print()
 
     cleanup()   # start from a known state, not yesterday's leftovers
+    seed_pantry.seed()   # the planner needs expiry data to score on
     print()
 
-    recipes = run_stage_1()
+    if args.fixtures:
+        insert_fixtures()
+    else:
+        run_stage_1()
     recipes = check_stage_1_invariants()
     print()
     slots = run_stage_2(args.offline)
     print()
-    check_handoff(recipes, slots)
+    check_handoff(recipes, slots, expect_extraction=not args.fixtures)
+    print()
+    meals = run_stage_3(use_llm=not args.fixtures)
+    print()
+    check_plan_invariants(meals, slots, recipes)
     show_sample(recipes)
 
     print()
@@ -282,7 +450,8 @@ def main() -> None:
     print()
 
     if args.keep:
-        print(f"  kept {len(recipes)} recipes and {len(slots)} cook_slots")
+        print(f"  kept {len(recipes)} recipes, {len(slots)} cook_slots, "
+              f"{len(meals)} meals")
     else:
         cleanup()
 
