@@ -209,8 +209,18 @@ class Conversation(unittest.TestCase):
 
 
 class ToolSurface(unittest.TestCase):
-    def test_every_tool_is_registered(self) -> None:
-        self.assertEqual(len(concierge.TOOLS), 9)
+    def test_the_capabilities_the_agent_needs_are_all_present(self) -> None:
+        """Named, not counted — a magic number breaks every time a tool is added
+        and tells you nothing about what's missing."""
+        names = {tool.name for tool in concierge.TOOLS}
+        for required in (
+            "get_pantry", "add_pantry_items", "remove_pantry_item",
+            "get_recipes", "get_free_windows", "get_week_plan",
+            "whats_for_dinner", "plan_week", "schedule_recipe",
+            "move_meal", "remove_meal", "get_shopping_list",
+            "build_shopping_list", "sync_calendar",
+        ):
+            self.assertIn(required, names)
 
     def test_tools_carry_descriptions_for_the_model(self) -> None:
         """The docstring IS the tool description the model chooses from."""
@@ -226,6 +236,123 @@ class ToolSurface(unittest.TestCase):
         by_name = {t.name: t for t in concierge.TOOLS}
         self.assertIn("items", by_name["add_pantry_items"].input_schema["properties"])
         self.assertIn("replace_existing", by_name["plan_week"].input_schema["properties"])
+
+
+class RecipeMatching(unittest.TestCase):
+    """Nobody retypes a title. "the katsu" has to find "Chicken Katsu Curry"."""
+
+    RECIPES = [
+        {"id": "r1", "title": "Chicken Katsu Curry"},
+        {"id": "r2", "title": "Slow Braised Short Rib Ragu"},
+        {"id": "r3", "title": "10 Minute Garlic Butter Noodles"},
+    ]
+
+    def find(self, query):
+        with patch("lib.db.successful_recipes", return_value=self.RECIPES):
+            return concierge._find_recipe(query)
+
+    def test_exact_title(self) -> None:
+        self.assertEqual(self.find("Chicken Katsu Curry")["id"], "r1")
+
+    def test_case_insensitive(self) -> None:
+        self.assertEqual(self.find("chicken katsu curry")["id"], "r1")
+
+    def test_substring(self) -> None:
+        self.assertEqual(self.find("katsu")["id"], "r1")
+
+    def test_word_overlap_when_wording_differs(self) -> None:
+        self.assertEqual(self.find("the short rib thing")["id"], "r2")
+
+    def test_no_match_returns_nothing(self) -> None:
+        self.assertIsNone(self.find("beef wellington"))
+
+    def test_empty_query_returns_nothing(self) -> None:
+        self.assertIsNone(self.find(""))
+
+
+class DirectControl(unittest.TestCase):
+    RECIPE = {
+        "id": "r1", "title": "Chicken Katsu Curry", "cuisine": "japanese",
+        "est_time_minutes": 30, "total_time_minutes": 60,
+        "advance_prep_minutes": 0, "servings": 4, "ingredients": [],
+    }
+    SATURDAY = datetime(2026, 9, 19, 17, 30, tzinfo=config.TIMEZONE)
+
+    def slot(self, minutes=240, sid="s1"):
+        return {
+            "id": sid, "week_start_date": "2026-09-14",
+            "slot_start": self.SATURDAY.isoformat(),
+            "slot_end": (self.SATURDAY + timedelta(minutes=minutes)).isoformat(),
+            "duration_minutes": minutes, "assigned": False,
+        }
+
+    def test_unknown_recipe_is_reported_not_guessed(self) -> None:
+        with patch("lib.db.successful_recipes", return_value=[]):
+            out = run_tool(concierge.schedule_recipe,
+                           recipe="beef wellington", day="saturday")
+        self.assertIn("don't have a recipe", out)
+
+    def test_rejects_a_word_that_is_not_a_weekday(self) -> None:
+        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]):
+            out = run_tool(concierge.schedule_recipe,
+                           recipe="katsu", day="whenever")
+        self.assertIn("weekday", out)
+
+    def test_a_day_with_no_window_says_so(self) -> None:
+        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]),              patch("lib.db.select", return_value=[]):
+            out = run_tool(concierge.schedule_recipe,
+                           recipe="katsu", day="saturday")
+        self.assertIn("no free cooking window", out.lower())
+
+    def test_refuses_a_window_too_short_for_the_dish(self) -> None:
+        """The manual path uses the same fit rule as the planner."""
+        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]),              patch("lib.db.select", return_value=[self.slot(minutes=40)]):
+            out = run_tool(concierge.schedule_recipe,
+                           recipe="katsu", day="saturday")
+        self.assertIn("60 min", out)
+        self.assertIn("40 min", out)
+
+    def test_refuses_when_there_is_no_time_for_advance_prep(self) -> None:
+        marinade = dict(self.RECIPE, advance_prep_minutes=720)
+        soon = self.slot()
+        soon["slot_start"] = (config.now_local() + timedelta(hours=2)).isoformat()
+        with patch("lib.db.successful_recipes", return_value=[marinade]),              patch("stages.concierge._slots_on", return_value=[soon]):
+            out = run_tool(concierge.schedule_recipe,
+                           recipe="katsu", day="saturday")
+        self.assertIn("prep", out)
+
+    def test_places_the_meal_and_marks_the_window_taken(self) -> None:
+        placed = {"id": "m1", "planned_start_time": self.SATURDAY.isoformat()}
+        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]),              patch("stages.concierge._slots_on", return_value=[self.slot()]),              patch("lib.db.select", return_value=[]),              patch("lib.db.insert", return_value=[placed]),              patch("lib.db.update") as update:
+            out = run_tool(concierge.schedule_recipe,
+                           recipe="katsu", day="saturday")
+        self.assertIn("Saturday", out)
+        update.assert_any_call("cook_slots", "s1", {"assigned": True})
+
+    def test_scheduling_warns_the_shopping_list_is_stale(self) -> None:
+        placed = {"id": "m1", "planned_start_time": self.SATURDAY.isoformat()}
+        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]),              patch("stages.concierge._slots_on", return_value=[self.slot()]),              patch("lib.db.select", return_value=[]),              patch("lib.db.insert", return_value=[placed]),              patch("lib.db.update"):
+            out = run_tool(concierge.schedule_recipe,
+                           recipe="katsu", day="saturday")
+        self.assertIn("shopping list", out.lower())
+
+    def test_moving_something_not_planned_is_explained(self) -> None:
+        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]),              patch("lib.db.select", return_value=[]):
+            out = run_tool(concierge.move_meal, recipe="katsu", to_day="sunday")
+        self.assertIn("isn't on the plan", out)
+
+    def test_removing_frees_the_window(self) -> None:
+        meal = {"id": "m1", "recipe_id": "r1", "cook_slot_id": "s1"}
+        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]),              patch("lib.db.select", return_value=[meal]),              patch("lib.db.update") as update,              patch("lib.db.delete_where") as delete:
+            out = run_tool(concierge.remove_meal, recipe="katsu")
+        update.assert_any_call("cook_slots", "s1", {"assigned": False})
+        delete.assert_any_call("meal_plan", id="m1")
+        self.assertIn("Dropped", out)
+
+    def test_removing_something_absent_is_not_an_error(self) -> None:
+        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]),              patch("lib.db.select", return_value=[]):
+            self.assertIn("wasn't on the plan",
+                          run_tool(concierge.remove_meal, recipe="katsu"))
 
 
 if __name__ == "__main__":

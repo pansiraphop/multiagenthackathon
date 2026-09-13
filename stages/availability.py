@@ -246,6 +246,43 @@ def build_slots(week_start: date, offline: bool = False) -> tuple[list[dict], bo
     return rows, True
 
 
+def _relink_plan(week_start: date, slots: list[dict]) -> int:
+    """Re-attach planned meals to the rewritten windows.
+
+    Rewriting cook_slots is a delete-then-insert, and meal_plan.cook_slot_id is
+    ON DELETE SET NULL — so a second availability run silently orphans every
+    planned meal and leaves `assigned` false on windows that are actually
+    taken. run_week calls availability on every run, so this happened on the
+    second pass every time, without an error anywhere.
+
+    Windows are derived from the calendar, so a re-read normally produces the
+    same start times; matching on those puts the plan back together.
+    """
+    week = week_start.isoformat()
+    by_start = {slot["slot_start"]: slot for slot in slots}
+    relinked, stranded = 0, 0
+
+    for meal in db.select("meal_plan", "*", week_start_date=week):
+        slot = by_start.get(meal["planned_start_time"])
+        if not slot:
+            # The window this meal sits in no longer exists — the calendar
+            # changed, or it was planned against fallback slots. Say so: the
+            # plan is stale and re-planning is the fix.
+            stranded += 1
+            continue
+        if meal.get("cook_slot_id") != slot["id"]:
+            db.update("meal_plan", meal["id"], {"cook_slot_id": slot["id"]})
+            relinked += 1
+        if not slot.get("assigned"):
+            db.update("cook_slots", slot["id"], {"assigned": True})
+
+    if stranded:
+        print(f"      [warn] {stranded} planned meal(s) sit in windows that no "
+              f"longer exist - re-run the planner")
+
+    return relinked
+
+
 def run(week_start: date | None = None, offline: bool = False,
         show_only: bool = False) -> list[dict]:
     week_start = week_start or config.week_start()
@@ -264,6 +301,10 @@ def run(week_start: date | None = None, offline: bool = False,
     db.delete_where("cook_slots", week_start_date=week_start.isoformat())
     written = db.insert("cook_slots", rows)
     print(f"      wrote {len(written)} cook_slots")
+
+    relinked = _relink_plan(week_start, written)
+    if relinked:
+        print(f"      re-linked {relinked} planned meal(s) to the new windows")
     return written
 
 

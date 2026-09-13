@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import anthropic
 from anthropic import beta_tool
@@ -57,10 +57,16 @@ How to act:
 - Use tools for anything factual. Never guess what's planned or in the pantry.
 - When they mention food they have or bought, add it to the pantry without
   being asked to.
-- Planning the week needs cook windows first; get_week_plan and plan_week
-  handle that for you.
-- Don't ask permission for reversible things. Do ask before replacing a plan
-  they already have.
+- They can direct you: "make the katsu on Thursday", "move the wings to
+  Saturday", "drop the ragu". Use schedule_recipe, move_meal and remove_meal
+  for those rather than re-planning the whole week around one request.
+- plan_week is for "sort out my week". It replaces everything, so ask first if
+  a plan already exists.
+- Changing the plan makes the shopping list stale. Say so; rebuild it if they
+  want.
+- Don't ask permission for reversible things.
+- Plenty of messages aren't requests at all. Answer cooking questions, explain
+  a step, suggest a substitution — you don't need a tool to be useful.
 """
 
 
@@ -198,7 +204,7 @@ def plan_week(replace_existing: bool = False) -> str:
     meals = plan.run(week_start=week_start, use_llm=True)
     if not meals:
         return "Nothing fit the windows available this week."
-    return f"Planned {len(meals)} meals. " + get_week_plan()
+    return f"Planned {len(meals)} meals. " + get_week_plan.func()
 
 
 @beta_tool
@@ -277,10 +283,238 @@ def whats_for_dinner(day: str = "") -> str:
             f"Recipe: {config.APP_BASE_URL}/cook/{chosen['id']}")
 
 
+# ---------------------------------------------------------------------------
+# direct control — "make the katsu on Thursday"
+#
+# plan_week is the automatic path. These are the manual one: the user names a
+# reel and a day and it happens. Everything still goes through the same fit
+# rules the planner uses, so a manual choice can't produce a week the automatic
+# planner would have rejected.
+# ---------------------------------------------------------------------------
+
+WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday",
+            "saturday", "sunday")
+
+
+def _find_recipe(query: str) -> dict | None:
+    """Match a recipe by whatever the user actually typed.
+
+    "the katsu", "katsu curry" and "Chicken Katsu Curry" all have to land on
+    the same row — nobody retypes a title exactly.
+    """
+    recipes = db.successful_recipes()
+    wanted = (query or "").strip().lower()
+    if not wanted:
+        return None
+
+    for recipe in recipes:
+        if (recipe.get("title") or "").lower() == wanted:
+            return recipe
+    for recipe in recipes:
+        if wanted in (recipe.get("title") or "").lower():
+            return recipe
+
+    # Word overlap, so "katsu curry" still finds "Chicken Katsu Curry".
+    words = {w for w in wanted.split() if len(w) > 2}
+    best, best_score = None, 0
+    for recipe in recipes:
+        title_words = set((recipe.get("title") or "").lower().split())
+        score = len(words & title_words)
+        if score > best_score:
+            best, best_score = recipe, score
+    return best
+
+
+def _slots_on(day_name: str, week_start: date) -> list[dict]:
+    """Cook windows on a named weekday, earliest first."""
+    wanted = (day_name or "").strip().lower()
+    rows = db.select("cook_slots", "*", week_start_date=week_start.isoformat())
+    out = []
+    for slot in rows:
+        start = datetime.fromisoformat(slot["slot_start"]).astimezone(config.TIMEZONE)
+        if f"{start:%A}".lower() == wanted:
+            out.append(slot)
+    return sorted(out, key=lambda s: s["slot_start"])
+
+
+def _fits(recipe: dict, slot: dict, now: datetime) -> str | None:
+    """None if it fits, otherwise the reason it doesn't, in plain words."""
+    need = attended_minutes(recipe) + config.SLOT_BUFFER_MINUTES
+    if need > slot["duration_minutes"]:
+        return (f"needs {attended_minutes(recipe)} min but that window is only "
+                f"{slot['duration_minutes']} min")
+    lead = advance_prep(recipe)
+    start = datetime.fromisoformat(slot["slot_start"])
+    if lead and now + timedelta(minutes=lead) > start:
+        return (f"needs {lead // 60}h of prep beforehand and there isn't that "
+                f"much time before then")
+    return None
+
+
+def _minutes_of(slot: dict) -> int:
+    start = datetime.fromisoformat(slot["slot_start"]).astimezone(config.TIMEZONE)
+    return start.hour * 60 + start.minute
+
+
+def _place(recipe: dict, slot: dict, week_start: date, reason: str) -> dict:
+    """Write one meal into a slot, clearing whatever occupied either end."""
+    week = week_start.isoformat()
+    start = datetime.fromisoformat(slot["slot_start"])
+    minutes = attended_minutes(recipe)
+
+    for existing in db.select("meal_plan", "*", week_start_date=week):
+        same_slot = existing.get("cook_slot_id") == slot["id"]
+        same_recipe = existing["recipe_id"] == recipe["id"]
+        if same_slot or same_recipe:
+            db.delete_where("meal_plan", id=existing["id"])
+            if existing.get("cook_slot_id"):
+                db.update("cook_slots", existing["cook_slot_id"],
+                          {"assigned": False})
+
+    row = db.insert("meal_plan", {
+        "recipe_id": recipe["id"],
+        "cook_slot_id": slot["id"],
+        "week_start_date": week,
+        "planned_date": start.astimezone(config.TIMEZONE).date().isoformat(),
+        "planned_start_time": slot["slot_start"],
+        "planned_end_time": (start + timedelta(minutes=minutes)).isoformat(),
+        "score_reason": reason,
+        "status": "planned",
+    })[0]
+    db.update("cook_slots", slot["id"], {"assigned": True})
+    return row
+
+
+@beta_tool
+def get_free_windows() -> str:
+    """The evenings the user is free to cook this week, read from their calendar."""
+    week_start = config.week_start()
+    slots = db.select("cook_slots", "*", week_start_date=week_start.isoformat())
+    if not slots:
+        slots = availability.run(week_start=week_start)
+    if not slots:
+        return "Couldn't read any free windows from the calendar."
+
+    lines = []
+    for slot in sorted(slots, key=lambda s: s["slot_start"]):
+        start = datetime.fromisoformat(
+            slot["slot_start"]).astimezone(config.TIMEZONE)
+        taken = " (taken)" if slot.get("assigned") else ""
+        lines.append(f"{start:%A} {start:%H:%M}, {slot['duration_minutes']} min{taken}")
+    return "Free windows: " + "; ".join(lines)
+
+
+@beta_tool
+def schedule_recipe(recipe: str, day: str, time: str = "") -> str:
+    """Put one specific recipe on one specific day.
+
+    Args:
+        recipe: The dish, however the user said it — "the katsu", "katsu curry".
+        day: A weekday name like "thursday".
+        time: Optional "HH:MM", to choose between windows on a busy evening.
+    """
+    week_start = config.week_start()
+    found = _find_recipe(recipe)
+    if not found:
+        return f"I don't have a recipe matching '{recipe}'. Send me the reel?"
+    if day.strip().lower() not in WEEKDAYS:
+        return f"'{day}' isn't a weekday I recognise."
+
+    slots = _slots_on(day, week_start)
+    if not slots:
+        return (f"There's no free cooking window on {day.title()} — the "
+                f"calendar is full that evening.")
+
+    if time.strip() and ":" in time:
+        try:
+            hh, mm = (int(part) for part in time.split(":")[:2])
+            slots.sort(key=lambda s: abs(_minutes_of(s) - (hh * 60 + mm)))
+        except ValueError:
+            pass
+
+    now = config.now_local()
+    problems = []
+    for slot in slots:
+        why = _fits(found, slot, now)
+        if why:
+            problems.append(why)
+            continue
+        row = _place(found, slot, week_start,
+                     f"You asked for this on {day.title()}.")
+        start = datetime.fromisoformat(
+            row["planned_start_time"]).astimezone(config.TIMEZONE)
+        return (f"{found['title']} is on for {start:%A} at {start:%H:%M}, "
+                f"{attended_minutes(found)} min. The shopping list needs "
+                f"rebuilding to match.")
+
+    return (f"{found['title']} won't fit {day.title()}: {problems[0]}. "
+            f"Want me to find a day that works?")
+
+
+@beta_tool
+def move_meal(recipe: str, to_day: str, time: str = "") -> str:
+    """Move an already-planned meal to a different day.
+
+    Args:
+        recipe: The dish to move.
+        to_day: The weekday to move it to.
+        time: Optional "HH:MM" preference.
+    """
+    found = _find_recipe(recipe)
+    if not found:
+        return f"I don't have a recipe matching '{recipe}'."
+
+    week = config.week_start().isoformat()
+    planned = [m for m in db.select("meal_plan", "*", week_start_date=week)
+               if m["recipe_id"] == found["id"]]
+    if not planned:
+        return f"{found['title']} isn't on the plan, so there's nothing to move."
+    return schedule_recipe.func(recipe=recipe, day=to_day, time=time)
+
+
+@beta_tool
+def remove_meal(recipe: str) -> str:
+    """Take one meal off the week's plan and free that evening up again."""
+    found = _find_recipe(recipe)
+    if not found:
+        return f"I don't have a recipe matching '{recipe}'."
+
+    week = config.week_start().isoformat()
+    removed = 0
+    for meal in db.select("meal_plan", "*", week_start_date=week):
+        if meal["recipe_id"] != found["id"]:
+            continue
+        if meal.get("cook_slot_id"):
+            db.update("cook_slots", meal["cook_slot_id"], {"assigned": False})
+        db.delete_where("meal_plan", id=meal["id"])
+        removed += 1
+
+    if not removed:
+        return f"{found['title']} wasn't on the plan."
+    return (f"Dropped {found['title']} — that evening is free again, and the "
+            f"shopping list is now out of date.")
+
+
+@beta_tool
+def sync_calendar() -> str:
+    """Write the planned week into Google Calendar as real events."""
+    from stages import calendar_sync
+
+    created = calendar_sync.run(week_start=config.week_start())
+    if not created:
+        return "Nothing new to add — the week is already on the calendar."
+    return f"Added {len(created)} events to the calendar."
+
+
 TOOLS = [
+    # pantry
     get_pantry, add_pantry_items, remove_pantry_item,
-    get_recipes, get_week_plan, plan_week,
-    get_shopping_list, build_shopping_list, whats_for_dinner,
+    # what's available and what's planned
+    get_recipes, get_free_windows, get_week_plan, whats_for_dinner,
+    # changing the plan — automatic, then by hand
+    plan_week, schedule_recipe, move_meal, remove_meal,
+    # downstream
+    get_shopping_list, build_shopping_list, sync_calendar,
 ]
 
 
