@@ -37,19 +37,46 @@ async def verify_webhook(request: Request) -> str:
     raise HTTPException(status_code=403, detail="verification failed")
 
 
-def handle_reply(reply: TextReply) -> None:
-    """Apply one inbound answer to the open follow-up question.
+def _has_open_question(sender_id: str) -> bool:
+    """Is stage 5b waiting on an answer from this person?"""
+    try:
+        from lib import db
 
-    stages.followup is imported here rather than at module scope so that a
-    missing Google or Instacart dependency can never stop the webhook from
-    accepting reels — ingestion is the one thing this process must always do.
+        return any(
+            row.get("recipient_id") in (None, sender_id)
+            for row in db.select("followups", "*", status="open")
+        )
+    except Exception:  # noqa: BLE001 - never let this decide by crashing
+        return False
+
+
+def handle_reply(reply: TextReply) -> None:
+    """Route one inbound text message.
+
+    Two different things can arrive as text. If stage 5b has an open question,
+    this is the answer to it and goes back into that state machine. Otherwise
+    it's conversation, and the concierge agent handles it — that agent's tools
+    are the pipeline stages, so anything the CLI can do can be asked for here.
+
+    Both are imported inside the function rather than at module scope so that a
+    missing Google or Instacart dependency can never stop the webhook accepting
+    reels — ingestion is the one thing this process must always do.
     """
     try:
-        from stages import followup
+        if _has_open_question(reply.sender_id):
+            from stages import followup
 
-        followup.apply_reply(reply)
+            followup.apply_reply(reply)
+            return
     except Exception as exc:  # noqa: BLE001 - background tasks must not kill the app
         print(f"  [warn] follow-up reply failed ({reply.sender_id}): {exc}")
+
+    try:
+        from stages import concierge
+
+        concierge.handle_dm(reply.sender_id, reply.text)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [warn] concierge failed ({reply.sender_id}): {exc}")
 
 
 @app.post("/webhook")
