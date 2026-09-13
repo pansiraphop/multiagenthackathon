@@ -1,30 +1,310 @@
 # InstaCook
 
-**Turn saved Instagram recipe reels into a cooked week.**
+**An agent in your Instagram DMs that turns recipe reels into a cooked week.**
 
-InstaCook reads a recipe reel, checks what's in your fridge and what's about to expire,
-looks at your real Google Calendar to find the evenings you're actually free, and then
-schedules the week: groceries ordered through Instacart timed to arrive before you cook,
-and a calendar event for every meal with the ingredients, the steps, and the cart link
-already in it.
-
-Built for the **Multi-App AI Agent Hackathon** (Sunday, September 13, 2026).
-Build closes 4:00 PM PT.
-
-**Apps it acts across:** Instagram · Google Calendar (read + write) · Instacart
-· ElevenLabs
-
-**The whole thing is reachable from an Instagram DM.** Send a reel and it becomes a
-recipe; send a message and the concierge agent answers, plans, reschedules or shops —
-see §4b. · ElevenLabs
-
-This README is the shared spec. It sets direction and fixes the contracts between stages;
-implementation details get filled in as we build. If you change a contract, change it
-here first and tell the other person.
+Built for the Multi-App AI Agent Hackathon, 13 September 2026, by Pan and Shiven.
 
 ---
 
-## 1. Pipeline
+## 1. Project overview
+
+### The problem
+
+You see something delicious while scrolling, save the reel, and never cook it. Cooking it
+means keeping the reel open, transcribing the ingredients, working out what you already
+have, going shopping, then scrubbing back through a video with your hands covered in oil —
+and finding an evening you're actually free to do all that.
+
+The recipe isn't the hard part. Everything around it is.
+
+### What we built
+
+Send a reel to InstaCook in your Instagram DMs. That's the whole interaction.
+
+It extracts the recipe, checks what's in your fridge and what's about to expire, reads
+your real Google Calendar to find the evenings you're genuinely free, fits each recipe
+into a window long enough to actually cook it, orders only the groceries you're missing so
+they land before the first meal, and writes the week into your calendar with the
+ingredients, the steps and the cart link in every invite.
+
+Then it talks you through the cooking, hands-free.
+
+The DM is not a trigger — it's the interface. You can also say *"make the katsu on
+Saturday"*, *"move the wings to Thursday"*, *"I just bought salmon"*, or *"what's a good
+sub for gochujang"*, and it does the right thing.
+
+### What makes it more than a recipe extractor
+
+**It knows when you're free.** The planner solves a constrained assignment, not a ranking.
+A 45-minute recipe cannot go in a 25-minute gap, and a two-hour braise only fits the one
+evening that holds it. Recipes carry three different times — hands-on, *attended* (the
+span you must be home for), and advance prep you needn't be present for — and the
+calendar block is built from the attended span. Getting that wrong schedules a braise into
+a gap it can't possibly fit.
+
+**It knows what's going off.** Expiry urgency is the highest-weighted term in the score,
+and because the planner walks your free windows in chronological order, the food closest
+to spoiling lands on the earliest evening without that being a special case.
+
+**It buys the gap, not the recipe.** The shopping list subtracts your pantry, so a week of
+five meals is 28 items rather than 52.
+
+**It asks instead of guessing.** When the groceries can't arrive before the first cook
+slot, it DMs you with options rather than silently re-planning. That feedback edge — the
+system reconsidering its own output because the physical world said no — is the part that
+makes it an agent rather than a scheduled job.
+
+**It tells you when it's unsure.** A reel that's just beauty shots gets reconstructed from
+web research, and the recipe is labelled `reconstructed` in the database and on the page.
+Qualitative amounts are estimated rather than left blank — a null is useless at a stove —
+but shown as `~2 tbsp (a good glug)` so an estimate never reads as a measurement.
+
+---
+
+## 2. External apps used
+
+Five, all exercised against live services. Attempt counts are from `eval_log`, the table
+every stage writes to on success and failure.
+
+| App | What it does | Where | Logged calls |
+|---|---|---|---|
+| **Instagram** (Meta Graph API) | Receives reels and messages, sends replies. The whole product lives here. | `webhook.py`, `lib/instagram.py`, `lib/ingest.py` | 42 |
+| **Google Calendar** | **Read:** free/busy, to find real cook windows. **Write:** an event per meal plus the delivery window. | `stages/availability.py`, `stages/calendar_sync.py` | 55 |
+| **Instacart** (via **Browserbase**) | Builds a real cart from the shopping list. Browserbase drives a live browser session; falls back to search links when a cart can't be built. | `stages/instacart.py`, `lib/browser.py` | 40 |
+| **ElevenLabs** | Speaks the cooking steps aloud, one at a time, from the recipe page. | `stages/voiceover.py`, `web/` | 35 |
+| **Anthropic** (Claude Opus 5) | Extraction, recipe reconstruction with web search, and the DM agent's tool-calling loop. | `lib/llm.py`, `stages/concierge.py` | 85 |
+
+Supabase is the datastore the stages communicate through. It isn't counted above — it's
+our backend rather than an app the agent acts across.
+
+**Browserbase and Instacart are counted as one entry** because Browserbase is how we reach
+Instacart. Counted separately that's six.
+
+---
+
+## 3. Setup instructions
+
+### Requirements
+
+Python 3.11+, Node 18+ (only to apply the database schema), and accounts for the services
+above.
+
+### 1. Install
+
+```bash
+git clone https://github.com/pansiraphop/multiagenthackathon.git
+cd multiagenthackathon
+pip install -r requirements.txt
+```
+
+### 2. Configure
+
+```bash
+cp .env.example .env
+```
+
+Fill in `.env`. The minimum to run the pipeline:
+
+```bash
+SUPABASE_URL=...            # Project Settings -> API
+SUPABASE_KEY=...            # publishable key is enough
+ANTHROPIC_API_KEY=...
+TIMEZONE=America/Los_Angeles
+```
+
+Add these for the full system:
+
+```bash
+INSTAGRAM_ACCESS_TOKEN=...  # without it, replies print to the console instead
+META_VERIFY_TOKEN=...       # any string; Meta echoes it back at subscription
+BROWSERBASE_API_KEY=...
+BROWSERBASE_PROJECT_ID=...
+ELEVENLABS_API_KEY=...
+APP_BASE_URL=http://localhost:8000   # or your ngrok URL
+```
+
+### 3. Create the database
+
+Paste `sql/schema.sql` into the Supabase SQL editor and run it. No credentials needed.
+
+Alternatively, with `DATABASE_URL` and `DIRECT_URL` set: `npm install && npm run db:push`.
+Prisma is the schema source of truth; Python queries through `supabase-py` at runtime.
+
+### 4. Authorize Google Calendar
+
+Create an OAuth **Desktop app** client in Google Cloud Console, enable the Google Calendar
+API, add yourself as a Test user on the consent screen, and save the downloaded JSON as
+`credentials.json` in the repo root. Then:
+
+```bash
+python -m lib.google_auth
+```
+
+A browser opens once. This makes a real free/busy call, which is the half that silently
+403s if the consent screen granted `calendar.events` only — if it prints `free/busy OK`,
+the calendar side works.
+
+### 5. Seed the demo data
+
+```bash
+python -m seed.seed_pantry      # a fridge, with things at different stages of going off
+python -m seed.seed_calendar    # a realistically busy week on your calendar
+```
+
+### 6. Run it
+
+```bash
+python run_week.py                 # extract -> plan -> shop -> schedule
+python run_week.py --instacart     # ...and build a real Instacart cart
+python run_week.py --dry-run       # read-only: no calendar writes, no cart
+```
+
+Stage 5 is **opt-in**: building a cart is the one step with real-world consequences, so
+nothing touches Instacart unless you ask for it by name.
+
+### 7. The web app
+
+```bash
+uvicorn web.app:app --port 8000
+```
+
+`/` this week · `/cook/{meal_id}` the recipe page the calendar links to · `/pantry`
+
+`APP_BASE_URL` is baked into calendar descriptions **at write time**, so set it before
+running the calendar stage.
+
+### 8. Talk to the agent
+
+```bash
+python -m stages.concierge --chat
+python -m stages.concierge --say "what am I cooking Tuesday?"
+```
+
+This is the identical code path the Instagram webhook uses, so it can be driven without
+Instagram in the loop.
+
+To connect Instagram for real:
+
+```bash
+uvicorn webhook:app --port 8000
+ngrok http 8000
+```
+
+Then point the Meta webhook subscription at `https://<your-ngrok>.ngrok.io/webhook` and
+subscribe to the `messages` field.
+
+---
+
+## 4. Reliability testing
+
+### How to see it
+
+```bash
+python -m unittest discover -s tests -t .   # 388 tests, no network, under 7 seconds
+python run_eval.py                          # the reliability report below
+python run_eval.py --failures               # every recorded failure, in full
+```
+
+### What we measured
+
+Every stage writes to an `eval_log` table on **success and failure**, with its retry count
+and duration. `run_eval.py` reads it back. These numbers are from real calls to real
+services, accumulated across a day of building:
+
+```
+275 logged attempts across 11 stages, 261 succeeded (94.9%), 14 failed.
+
+| Stage         | Attempts | Success   | p50 ms | p95 ms |
+|---------------|----------|-----------|--------|--------|
+| extraction    | 43       | 43 (100%) | 8933   | 125998 |
+| concierge     | 42       | 42 (100%) | 6212   | 18109  |
+| calendar      | 47       | 46 (98%)  | 430    | 680    |
+| instagram_dm  | 27       | 26 (96%)  | 1033   | 2327   |
+| ingestion     | 15       | 14 (93%)  | 8697   | 13522  |
+| instacart     | 40       | 37 (92%)  | 312500 | 312500 |
+| voiceover     | 35       | 31 (89%)  | 4077   | 23975  |
+| shopping_list | 9        | 8  (89%)  | —      | —      |
+| planning      | 7        | 7  (100%) | 4424   | 4424   |
+| availability  | 8        | 6  (75%)  | 603    | 1080   |
+| followup      | 2        | 1  (50%)  | —      | —      |
+```
+
+Success rate is **per attempt, not per outcome**. A stage that failed once and succeeded
+on retry counts as two attempts and one failure. Hiding the retry would make the system
+look more reliable than it is.
+
+A high p95 is usually a fallback working rather than a stall. Extraction's tail is the
+reconstruction path — identify the dish, search the web, re-extract — which runs only when
+a reel contains no usable recipe.
+
+### How it's tested
+
+**388 unit tests**, stdlib `unittest`, no network. They run in under seven seconds, which
+means they get run. Coverage is weighted toward the things that fail *silently*:
+
+- `test_extraction.py` — the three cooking times, unit conversion, the escalation gate
+- `test_availability.py` — gap inversion, slot scoring, the fallback path
+- `test_plan.py` — scoring, constrained assignment, determinism
+- `test_shopping_list.py` — consolidation, pantry subtraction, unit rendering
+- `test_calendar_sync.py` — event bodies, the delivery-conflict feedback edge
+- `test_concierge.py` — the agent's tools, conversation memory, model-failure handling
+- `test_webhook_routing.py` — which handler an inbound DM reaches
+- `test_ingest.py`, `test_source.py`, `test_instacart.py` — ingestion and cart building
+
+**A live integration test** (`python -m tests.test_pipeline`) runs stages 1–4 against real
+services and asserts the *handoffs*, not the stages. Each stage passing alone doesn't mean
+the next can do anything: extraction has to produce recipes whose attended time fits the
+windows availability found, and the narrow windows have to actually exclude something —
+otherwise the fit constraint isn't doing any work. It also checks no window is
+double-booked, every calendar block is exactly the recipe's attended length, and the
+shopping list is strictly smaller than the ingredient list.
+
+`--fixtures` replays recorded extraction output so stages 2–4 stay testable with no model
+spend.
+
+### How it degrades
+
+Failure handling is designed, not incidental. Every external call goes through one wrapper
+that logs and returns `(result, ok)` rather than raising, so one failed item never takes
+down a batch.
+
+- **Google Calendar unreachable** → default evening windows, clearly scored low, so the
+  pipeline still produces a plan. Availability is upstream of everything and must never
+  hard-block.
+- **Instacart can't build a cart** → falls back to search links, and says so plainly
+  rather than presenting a search URL as a finished cart.
+- **A reel has no recipe** → reconstructed from web research and labelled as such. If the
+  dish can't be identified at all, extraction fails the row rather than inventing a recipe
+  unrelated to the reel.
+- **The model fails mid-conversation** → the agent replies with a plain sentence. An agent
+  that goes silent in a DM reads as broken.
+- **Everything is re-runnable.** Derived tables are delete-then-insert; anything with an
+  external side effect is skip-if-present, so re-running never duplicates a calendar event.
+
+### Known limitations
+
+We'd rather state these than have them found:
+
+- **No cross-dimension unit conversion.** Volume-to-mass depends on the ingredient, so
+  `3 tbsp butter` and `250 g butter` never merge and the pantry only offsets stock of the
+  same dimension. A mismatch means buying the full amount.
+- **Qualitative amounts are estimates.** "A good glug" becomes `~2 tbsp`, flagged
+  `is_approximate` and shown with the source's own wording.
+- **Free/busy can't tell "free" from "free but not at home."** A gap wedged between two
+  meetings is penalised, but the calendar can't know you're commuting.
+- **Single user.** No auth, and Row Level Security is disabled — appropriate for a
+  one-day demo, not for anything real.
+
+---
+
+# Appendix — how it works in detail
+
+Everything below is the engineering documentation the two of us built from.
+The submission answers are the four sections above.
+
+---
+
+## Pipeline
 
 ```
 Instagram DM ──▶ webhook.py ──┬── a reel?            ──▶ [1 extract]
@@ -57,7 +337,7 @@ Google Calendar ──▶ [2 availability] ──▶ cook_slots
                     [6 calendar_sync] ──▶ Google Calendar (write)
                                            │
                                            ▼
-                            [7 web app]  ← recipe page + pantry, §6
+                            [7 web app]  ← recipe page + pantry
 ```
 
 Six pipeline stages plus a web app the calendar links to. Each stage is a standalone script
@@ -78,7 +358,7 @@ interesting thing the system does.
 
 ---
 
-## 2. Ground rules
+## Ground rules
 
 Short list. Each one prevents a silently wrong answer rather than a crash, which is why
 they're worth agreeing on up front.
@@ -133,7 +413,7 @@ two retry patterns.
 
 ---
 
-## 3. Data model
+## Data model
 
 Supabase / Postgres. Path A owns the DDL. This is the contract — the columns that other
 stages depend on. Add whatever else you need.
@@ -164,12 +444,12 @@ newer question replaced it). `options` is `[{key, action, label, recipe_id?, slo
 where `action` is `later` / `swap` / `keep` — and it is deliberately the only thing needed
 to act on a reply, since `meal_plan_id` may point at a row that stage 3 has since replaced.
 
-`meal_plan.id` is the stable handle for a single meal. **The cook-session URL in §6 is
+`meal_plan.id` is the stable handle for a single meal. **The cook-session URL on the recipe page is
 built from it**, so don't regenerate those rows once the calendar has been written.
 
 ---
 
-## 4. Stages
+## The stages
 
 ### 1 · `extract.py` — reel → structured recipe
 Reads a pending reel's caption (± transcript); writes structured fields onto the
@@ -208,7 +488,7 @@ on 5/6 reels; transcript accepted on 2/6"* is a real brief line.
 Extraction uses `client.messages.parse()` with a Pydantic model on `claude-opus-5`, which
 makes the JSON schema-valid at the API level. **So the retry loop is for semantic
 validation, not parsing** — unit outside the enum, negative quantity, empty steps. It also
-means "100% schema valid" is a vanity metric; see §7.
+means "100% schema valid" is a vanity metric; see Evaluation notes.
 
 #### Thin reels: reconstruct rather than fail
 
@@ -418,13 +698,13 @@ ids back.
 
 One event per meal at its real cook time. Description carries `score_reason`, ingredients
 rendered with `render_amount()` so estimates read as `olive oil — ~2 tbsp (a good glug)`,
-numbered steps, the cart URL, the reel link, and **the cook-session URL from §6**. If the
+numbered steps, the cart URL, the reel link, and **the cook-session URL**. If the
 recipe was reconstructed, say so in the description. Plus one event for the
 delivery window. Explicit `timeZone`, skip rows that already have an event id.
 
 ---
 
-## 4b. The concierge — the whole system from a DM
+## The concierge — the whole system from a DM
 
 `stages/concierge.py`. Send a reel and ingestion takes it. Send **text** and this runs:
 the model picks tools, the tools are the pipeline stages, the reply goes back as a DM.
@@ -520,7 +800,7 @@ running stage 6 — or `calendar_sync --clear` and re-run afterwards.
 
 ---
 
-## 5. Supporting scripts
+## Supporting scripts
 
 - **`run_week.py`** — runs the pipeline in order and **prints its decisions as it goes.**
   The narration is the demo; judges should follow the reasoning without reading code.
@@ -528,7 +808,7 @@ running stage 6 — or `calendar_sync --clear` and re-run afterwards.
   is the one step with real-world consequences, so testing can never place an order.
   It also owns the feedback edge: if `plan.delivery_conflict()` finds the groceries can't
   reach the earliest cook slot, it re-plans without that window and rebuilds the list.
-- **`run_eval.py`** — see §7.
+- **`run_eval.py`** — the reliability report. See section 4 above.
 - **`seed_pantry.py`** — 29 items: some expiring within 48 hours, some in weeks, staples
   with no expiry, and one already expired to prove expired stock is ignored rather than
   treated as urgent. Names go through the normalizer on the way in; if the pantry says
@@ -542,7 +822,7 @@ running stage 6 — or `calendar_sync --clear` and re-run afterwards.
 
 ---
 
-## 6. Stage 7 — the web app + ElevenLabs voice
+## The web app + ElevenLabs voice
 
 `web/` is the site the calendar invite links to. Three pages, server-rendered, plus the
 guided-cooking API that plays ElevenLabs audio one beat at a time:
@@ -613,7 +893,7 @@ Changing it afterwards means `calendar_sync --clear` and re-running.
 
 ---
 
-## 7. Evaluation & the reliability brief
+## Evaluation notes
 
 Reliability and evaluation is **25% of the score — second only to technical execution**,
 and it's the one thing that can't be retrofitted at 3:30 PM.
@@ -656,7 +936,7 @@ what was offered, what was chosen, and what the agent then did.
 
 ---
 
-## 8. Ownership
+## Ownership
 
 Stages talk only through the database, so both paths proceed independently.
 
@@ -774,7 +1054,7 @@ same code path as an expired token.
 
 ---
 
-## 9. Timeline & cut list
+## Timeline & cut list
 
 | Time (PT) | Path A | Path B |
 |---|---|---|
@@ -797,7 +1077,7 @@ five criteria.
 
 ---
 
-## 10. Demo (2 minutes)
+## Demo notes
 
 | Time | Beat |
 |---|---|
