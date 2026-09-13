@@ -12,7 +12,7 @@ Built for the **Multi-App AI Agent Hackathon** (Sunday, September 13, 2026).
 Build closes 4:00 PM PT.
 
 **Apps it acts across:** Instagram · Google Calendar (read + write) · Instacart
-*(+ ElevenLabs, if the stretch goal lands — see §6)*
+*(ElevenLabs voice guidance is scaffolded in the web app — see §6)*
 
 This README is the shared spec. It sets direction and fixes the contracts between stages;
 implementation details get filled in as we build. If you change a contract, change it
@@ -40,10 +40,10 @@ Google Calendar ──▶ [2 availability] ──▶ cook_slots
                     [6 calendar_sync] ──▶ Google Calendar (write)
                                            │
                                            ▼
-                            [7 cook session]  ← optional stretch, §6
+                            [7 web app]  ← recipe page + pantry, §6
 ```
 
-Six stages plus an optional seventh. Each stage is a standalone script with one job.
+Six pipeline stages plus a web app the calendar links to. Each stage is a standalone script with one job.
 
 **Stages never import each other — they communicate only through Supabase rows.** That's
 the whole reason two people can build this in parallel: either of us can hand-insert rows
@@ -336,9 +336,12 @@ delivery window. Explicit `timeZone`, skip rows that already have an event id.
 
 ## 5. Supporting scripts
 
-- **`run_week.py`** — runs 1→6 in order and **prints its decisions as it goes.** The
-  narration is the demo; judges should follow the reasoning without reading code.
-  Flags worth having: resume-from-stage, and a dry-run that skips calendar writes.
+- **`run_week.py`** — runs the pipeline in order and **prints its decisions as it goes.**
+  The narration is the demo; judges should follow the reasoning without reading code.
+  `--dry-run` is read-only. **Stage 5 is opt-in behind `--instacart`** — building a cart
+  is the one step with real-world consequences, so testing can never place an order.
+  It also owns the feedback edge: if `plan.delivery_conflict()` finds the groceries can't
+  reach the earliest cook slot, it re-plans without that window and rebuilds the list.
 - **`run_eval.py`** — see §7.
 - **`seed_pantry.py`** — 29 items: some expiring within 48 hours, some in weeks, staples
   with no expiry, and one already expired to prove expired stock is ignored rather than
@@ -353,41 +356,68 @@ delivery window. Explicit `timeZone`, skip rows that already have an event id.
 
 ---
 
-## 6. Stage 7 (optional) — voice-guided cook session
+## 6. Stage 7 — the web app
 
-**ElevenLabs voice agent that walks you through cooking, hands-free.** The calendar invite
-carries a link; you open it when you start cooking and an agent is already waiting, knows
-which recipe you're making, and talks you through it — you can interrupt, ask to repeat a
-step, ask what to substitute.
+`web/` is the site the calendar invite links to. Three pages, server-rendered:
 
-This is a genuine stretch goal. **It only gets built if stages 1–6 are green end to end**,
-and it is the first thing cut. But three cheap decisions now mean it can be bolted on later
-with zero rework:
+| Route | What it is |
+|---|---|
+| `/` | This week's meals, and the single collated shopping list |
+| `/cook/{meal_plan_id}` | **What the calendar links to.** A recipe page you can cook from |
+| `/pantry` | What's in the fridge, grouped by how soon it goes off |
 
-### Decide now, build later
+```bash
+uvicorn web.app:app --reload --port 8000
+```
 
-1. **The link ships in the calendar description from the very first version**, pointing at
-   `{APP_BASE_URL}/cook/{meal_plan.id}`. Stage 6 then never has to change. If stage 7
-   never happens, that URL serves a plain recipe page — ingredients, steps, cart link.
-   Still useful, still demoable, never a dead link. This is the one thing that must be
-   true before stage 6 is considered done.
-2. **`meal_plan.id` is the session key.** Everything the agent needs — recipe, steps,
-   ingredients, timings — is reachable from that one id, so the page needs no state of its
-   own and no new tables.
-3. **Use ElevenLabs' hosted conversational agent, not a hand-rolled STT→LLM→TTS loop.**
-   Drop their embed on a static page and pass the recipe in as session context. That's the
-   difference between an afternoon and a day. Building our own voice pipeline is out of
-   scope today, full stop.
+### Why it's server-rendered Python and not a JS app
 
-### Rough shape
+**RLS is disabled on every table.** A browser-side app has to ship the Supabase key, and
+with RLS off that key grants full read *and write* on the whole database — in a demo
+video. Server-rendering keeps it on the server.
 
-A single static page: read the meal from Supabase by id, render the recipe, mount the
-ElevenLabs agent with the recipe and steps injected as context, and prompt it to act as a
-cooking guide — one step at a time, wait for the user, answer questions. Deploy anywhere
-that gives a public URL in one command.
+It also avoids writing the data layer twice. `render_amount()`, `attended_minutes()`,
+`advance_prep()` and `is_non_food()` are Python, tested, and have each had real bugs fixed
+in them. Reimplementing those rules in TypeScript is how a `~2 tbsp (a good glug)` quietly
+becomes `2 tbsp`.
 
-If it lands, ElevenLabs becomes a fourth external app and the demo gets a genuinely
-memorable closing beat. If it doesn't, nothing else in the system is affected.
+No template engine, no build step, no new dependencies — FastAPI was already here for the
+webhook. `web/views.py` is plain functions returning strings, so the pages are testable
+without a browser.
+
+### Designed for a phone at a stove
+
+Someone opens this with one hand, oily fingers, mid-step. So: 48px touch targets, nothing
+that depends on hover, tap-anywhere ingredient and step checkoff persisted per device,
+a sticky action bar inside the iOS safe-area inset, and the **Wake Lock API** so the
+screen doesn't die between steps. Estimates are marked `est.` — a guess must never read as
+a measurement.
+
+Warm paper ground, one clay accent, serif dish names against system-sans UI, hairline
+rules, full dark mode. Restraint is the point.
+
+### The voice half — ready, not wired
+
+The guided-cooking button is on the page and honestly disabled. `window.InstaCook.context`
+already carries the recipe, steps and ingredients the agent needs, so switching it on is:
+read that JSON, hand it to a **hosted ElevenLabs conversational agent** as session context,
+drop the `disabled` attribute. Their agent ships as a plain web component, so no framework
+is needed.
+
+Do not hand-roll an STT→LLM→TTS loop. That's the difference between an afternoon and a day.
+
+### The pantry, and where it's going
+
+The page reads real pantry rows and its add/remove forms work. But the intended path is
+the **Instagram agent**: you tell it what you bought and it fills the pantry in for you.
+The manual form is the fallback and the way to watch the data model work before that lands.
+
+### One thing that will bite
+
+`APP_BASE_URL` is baked into each calendar description **at write time**. Point it at
+wherever the app is actually reachable (`ngrok http 8000` is enough) *before* running stage
+6, or the link in the invite will say `localhost` on your phone. Changing it afterwards
+means `calendar_sync --clear` and re-running.
 
 ---
 
@@ -443,13 +473,15 @@ source of truth (see `DATABASE.md`). The shared layer is done and tested:
 | `lib/evals.py` | `log_eval()`, `timed()` context manager, `eval_report()`, `format_report()` |
 | `lib/external.py` | `call_external_api()` — returns `(result, ok)`, never raises |
 | `lib/google_auth.py` | OAuth with one read+write scope; re-consents if a cached token is too narrow |
+| `web/views.py` | Page rendering as pure functions — testable without a browser |
 | `lib/ingest.py` | Reel payload parsing, caption-first local Whisper fallback, deduplicated pending-recipe write |
 | `lib/source.py` | Transcript reliability score + caption/transcript SOURCE assembly for extraction |
 | `webhook.py` | FastAPI Meta verification + background Reel ingestion on port 8000 |
 | `stages/extract.py` | Agent entrypoint: list/rank pending reels, extract caption±transcript into recipes |
 
 Stages built: **1** `stages/extract.py`, **2** `availability.py`, **3** `plan.py`,
-**4** `shopping_list.py`. Seeds:
+**4** `shopping_list.py`, **5** `instacart.py`, **6** `calendar_sync.py`, **7** `web/`.
+`run_week.py` runs them in order. Seeds:
 `seed_pantry.py`, `seed_calendar.py`.
 
 Run `python -m lib.normalize`, `python -m lib.schemas`, and `python -m lib.source` for
