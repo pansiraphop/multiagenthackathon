@@ -195,12 +195,12 @@
       return;
     }
     setBusy(true);
-    setStatus("Preparing steps…");
+    setStatus("Writing detailed steps…");
     guide.startBtns.forEach(function (btn) {
-      btn.textContent = "Starting…";
+      btn.textContent = "Preparing…";
     });
 
-    fetch(context.guidance_url)
+    fetch(context.guidance_url + "?force=0")
       .then(function (res) {
         if (!res.ok) throw new Error("guidance " + res.status);
         return res.json();

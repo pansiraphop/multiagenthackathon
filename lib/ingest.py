@@ -104,33 +104,108 @@ def persist_pending_recipe(
     return row, True
 
 
+def _preview(caption: str | None, source_url: str) -> str:
+    """Short human label for a DM — first line of the caption, or the reel URL."""
+    if caption:
+        first = caption.strip().splitlines()[0].strip()
+        if first:
+            return first[:80]
+    return source_url
+
+
+def _notify(sender_id: str | None, text: str) -> None:
+    """Best-effort DM. Never raise — ingestion must outlive a send failure."""
+    if not sender_id:
+        print(f"\n      [dm not sent: no sender_id - printing instead]")
+        for line in text.splitlines():
+            print(f"      | {line}")
+        print()
+        return
+    try:
+        from lib import instagram
+
+        instagram.send_dm(sender_id, text)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [warn] could not DM {sender_id}: {exc}")
+
+
+def _extract_and_confirm(row: dict[str, Any], sender_id: str | None) -> None:
+    """Run stage 1 on the pending row and tell the sender what we got."""
+    try:
+        from stages.extract import extract_recipe
+
+        extracted = extract_recipe(row)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [warn] auto-extract failed ({row.get('id')}): {exc}")
+        _notify(
+            sender_id,
+            f"Got your reel ({_preview(row.get('raw_caption'), row.get('source_url') or '')}). "
+            "I saved it but couldn't extract the recipe yet — ask me to try again.",
+        )
+        return
+
+    if not extracted:
+        _notify(
+            sender_id,
+            f"Got your reel ({_preview(row.get('raw_caption'), row.get('source_url') or '')}). "
+            "Extraction didn't land — ask me to try again.",
+        )
+        return
+
+    title = extracted.get("title") or "that recipe"
+    minutes = extracted.get("total_time_minutes") or extracted.get("est_time_minutes")
+    timing = f", about {minutes} min" if minutes else ""
+    _notify(
+        sender_id,
+        f"Got it — {title}{timing}. Say \"add it to my week\" or \"plan my week\" and I'll fit it in.",
+    )
+
+
 def ingest_reel(reel: ReelIngest) -> dict[str, Any] | None:
-    """Persist one attachment for extraction; designed for a background thread."""
+    """Persist one attachment for extraction; designed for a background thread.
+
+    Caption is written first so the row exists even if Whisper is slow. Then we
+    DM the sender and run extraction — without that, a follow-up text like
+    \"I want to cook this\" hits the concierge while the reel is invisible.
+    """
     started = time.monotonic()
     try:
         existing = db.select("recipes", "*", source_url=reel.source_url)
         if existing:
             return existing[0]
 
-        transcript = (
-            fetch_transcript(reel.source_url) if config.INGEST_TRANSCRIBE else None
-        )
-        if not reel.caption and not transcript:
+        if not reel.caption and not config.INGEST_TRANSCRIBE:
             raise ValueError("Reel has neither a caption nor a usable transcript")
 
+        # Persist on caption alone first — transcription is best-effort and slow.
         row, inserted = persist_pending_recipe(
             reel.source_url,
             reel.caption,
-            transcript,
+            None,
             reel.sender_id,
         )
-        if inserted:
-            log_eval(
-                "ingestion",
-                input_ref=reel.source_url,
-                success=True,
-                duration_ms=int((time.monotonic() - started) * 1000),
-            )
+        if not inserted:
+            return row
+
+        if config.INGEST_TRANSCRIBE:
+            transcript = fetch_transcript(reel.source_url)
+            if transcript:
+                db.update("recipes", row["id"], {"raw_transcript": transcript})
+                row = {**row, "raw_transcript": transcript}
+            elif not reel.caption:
+                raise ValueError("Reel has neither a caption nor a usable transcript")
+
+        log_eval(
+            "ingestion",
+            input_ref=reel.source_url,
+            success=True,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        _notify(
+            reel.sender_id,
+            f"Got your reel — {_preview(reel.caption, reel.source_url)}. Pulling the recipe now.",
+        )
+        _extract_and_confirm(row, reel.sender_id)
         return row
     except Exception as exc:  # noqa: BLE001 - background jobs must not kill the app
         log_eval(

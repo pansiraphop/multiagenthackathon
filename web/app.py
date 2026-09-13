@@ -141,9 +141,13 @@ def cook(meal_id: str) -> str:
 
 
 @app.get("/cook/{meal_id}/guidance")
-def guidance(meal_id: str) -> JSONResponse:
-    """Segment list for the Next-button cook-along. Text only; audio is lazy."""
-    payload = cook_guidance(meal_id)
+def guidance(meal_id: str, force: bool = False) -> JSONResponse:
+    """Segment list for the Next-button cook-along.
+
+    Builds a detailed script once (method + transcript cues) and caches it.
+    Pass force=1 to regenerate after the recipe or prompt changes.
+    """
+    payload = cook_guidance(meal_id, force=force)
     if not payload:
         raise HTTPException(status_code=404, detail="No guidance for this meal")
     return JSONResponse(payload)

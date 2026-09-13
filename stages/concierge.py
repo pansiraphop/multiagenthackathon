@@ -67,6 +67,9 @@ How to act:
 - Don't ask permission for reversible things.
 - Plenty of messages aren't requests at all. Answer cooking questions, explain
   a step, suggest a substitution — you don't need a tool to be useful.
+- When they say \"this\" / \"this reel\" / \"I want to cook this\", call
+  get_recipes — a reel they just sent may already be pending or extracted.
+  Never claim nothing came through without checking.
 """
 
 
@@ -149,13 +152,33 @@ def remove_pantry_item(name: str) -> str:
 
 @beta_tool
 def get_recipes() -> str:
-    """List the recipes extracted from reels that are available to plan with."""
-    rows = db.successful_recipes()
-    if not rows:
+    """List recipes from reels — extracted ones plus any still being processed."""
+    ready = db.successful_recipes()
+    pending = db.pending_recipes()
+    if not ready and not pending:
         return "No recipes yet. Send me a reel."
-    return f"{len(rows)} recipes: " + "; ".join(
-        f"{r['title']} ({attended_minutes(r)} min, {r.get('cuisine') or 'other'})"
-        for r in rows)
+
+    parts: list[str] = []
+    if ready:
+        parts.append(
+            f"{len(ready)} ready: "
+            + "; ".join(
+                f"{r['title']} ({attended_minutes(r)} min, "
+                f"{r.get('cuisine') or 'other'})"
+                for r in ready
+            )
+        )
+    if pending:
+        parts.append(
+            f"{len(pending)} still extracting: "
+            + "; ".join(
+                (r.get("raw_caption") or r.get("source_url") or "reel")
+                .strip()
+                .splitlines()[0][:60]
+                for r in pending
+            )
+        )
+    return " | ".join(parts)
 
 
 @beta_tool

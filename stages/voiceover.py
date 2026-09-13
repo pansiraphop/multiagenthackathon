@@ -30,6 +30,7 @@ costs credits, and a demo gets re-run.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import sys
 from datetime import date, datetime, timedelta
@@ -49,6 +50,7 @@ from lib.schemas import (
     VoiceoverScript,
     VoiceoverSegment,
     attended_minutes,
+    mentions,
     spoken_seconds,
     spoken_text,
     validate_voiceover,
@@ -254,6 +256,11 @@ def meal_brief(meal_id: str) -> dict | None:
         "reconstructed": recipe.get("provenance") == "reconstructed",
         "ingredients": [_spoken_ingredient(i) for i in recipe.get("ingredients", [])],
         "steps": list(recipe.get("steps") or []),
+        # Source text is what lets the spoken beats go beyond bare bullets —
+        # heat, pacing, "until jammy" cues that the extractor folded into steps
+        # or that only survive in the transcript.
+        "source_caption": (recipe.get("raw_caption") or "").strip(),
+        "source_transcript": (recipe.get("raw_transcript") or "").strip(),
     }
 
 
@@ -272,6 +279,15 @@ def format_meal_brief(brief: dict) -> str:
     lines += ["", "STEPS:"]
     lines += [f"{n}. {step}" for n, step in enumerate(brief["steps"], start=1)] \
         or ["1. no method recorded"]
+
+    source_bits = []
+    if brief.get("source_caption"):
+        source_bits.append("CAPTION:\n" + brief["source_caption"][:1500])
+    if brief.get("source_transcript"):
+        source_bits.append("TRANSCRIPT:\n" + brief["source_transcript"][:2500])
+    if source_bits:
+        lines += ["", "SOURCE (use for heat, timing, and technique cues that "
+                  "match a step — do not invent from this):", *source_bits]
     return "\n".join(lines)
 
 
@@ -310,22 +326,104 @@ def template_week_script(brief: dict) -> VoiceoverScript:
                            segments=segments)
 
 
+def _spoken_step(index: int, total: int, step: str) -> str:
+    """Expand a method bullet into something that sounds right spoken aloud.
+
+    Keeps every concrete cue already in the step (heat, time, visual target)
+    and spells abbreviations a TTS voice would otherwise mumble.
+    """
+    text = " ".join(step.strip().split())
+    replacements = (
+        (r"\b(\d+)\s*-\s*(\d+)\b", r"\1 to \2"),
+        (r"\b(\d+)\s*°\s*C\b", r"\1 degrees Celsius"),
+        (r"\b(\d+)\s*°\s*F\b", r"\1 degrees Fahrenheit"),
+        (r"\b(\d+)\s*cm\b", r"\1 centimetre"),
+        (r"\b(\d+)\s*min(?:ute)?s?\b", r"\1 minutes"),
+        (r"\btbsp\b", "tablespoons"),
+        (r"\btsp\b", "teaspoons"),
+        (r"\bmed(?:ium)?-low\b", "medium-low"),
+        (r"\bmed(?:ium)?-high\b", "medium-high"),
+    )
+    for pattern, repl in replacements:
+        text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
+    if not text.endswith((".", "!", "?")):
+        text += "."
+    return f"Step {index} of {total}. {text}"
+
+
 def template_cook_script(brief: dict) -> VoiceoverScript:
+    """Deterministic fallback that still keeps method detail audible.
+
+    Prefer the LLM path when available — it can fold transcript cues into each
+    beat. This version never invents; it only speaks the bullets clearly.
+    """
+    total = len(brief["steps"])
     segments = [VoiceoverSegment(
         label="opening",
         text=f"Tonight you are making {brief['title']}. "
-             f"About {brief['attended']} minutes.",
+             f"About {brief['attended']} minutes"
+             + (f", for {brief['servings']}" if brief.get("servings") else "")
+             + ". I'll walk you through each step — heat, timing, and what "
+               "to look for.",
     )]
     if brief["ingredients"]:
         segments.append(VoiceoverSegment(
             label="ingredients",
-            text="You will need: " + "; ".join(brief["ingredients"]) + ".",
+            text="First, gather what you need: "
+                 + "; ".join(brief["ingredients"]) + ".",
         ))
     for index, step in enumerate(brief["steps"], start=1):
-        segments.append(VoiceoverSegment(label=f"step-{index}",
-                                         text=f"Step {index}. {step}"))
-    segments.append(VoiceoverSegment(label="close", text="That's it. Enjoy."))
+        segments.append(VoiceoverSegment(
+            label=f"step-{index}",
+            text=_spoken_step(index, total, step),
+        ))
+    segments.append(VoiceoverSegment(
+        label="close",
+        text="That's the last step. Plate it up and enjoy.",
+    ))
     return VoiceoverScript(title=_slug(brief["title"]), segments=segments)
+
+
+def _validate_cook_script(brief: dict, max_words: int):
+    """Semantic checks plus: one spoken beat per method step."""
+    expected = len(brief["steps"])
+
+    def _check(script: VoiceoverScript) -> list[str]:
+        problems = validate_voiceover(
+            script,
+            must_mention=(brief["title"],),
+            max_words=max_words,
+            min_words=max(40, expected * 8),
+        )
+        step_segs = [s for s in script.segments
+                     if s.label.startswith("step-")]
+        if len(step_segs) != expected:
+            problems.append(
+                f"need exactly {expected} step segments (step-1 … "
+                f"step-{expected}), got {len(step_segs)}"
+            )
+        for index, step in enumerate(brief["steps"], start=1):
+            label = f"step-{index}"
+            match = next((s for s in step_segs if s.label == label), None)
+            if not match:
+                problems.append(f"missing segment '{label}'")
+                continue
+            words = len(match.text.split())
+            if words > config.COOK_STEP_MAX_WORDS:
+                problems.append(
+                    f"{label} is {words} words; keep each step under "
+                    f"{config.COOK_STEP_MAX_WORDS}"
+                )
+            # A beat that drops the step's own concrete cues is too thin.
+            if not mentions(match.text, step) and words < 12:
+                problems.append(
+                    f"{label} is too thin and does not reflect the method "
+                    f"bullet — expand with the heat, timing, and cues "
+                    f"already in the step"
+                )
+        return problems
+
+    return _check
 
 
 def compose(
@@ -336,6 +434,7 @@ def compose(
     max_words: int,
     input_ref: str,
     use_llm: bool = True,
+    validate=None,
 ) -> tuple[VoiceoverScript, bool]:
     """Return (script, written_by_model).
 
@@ -345,6 +444,8 @@ def compose(
     """
     if not use_llm:
         return fallback, False
+    checker = validate or (lambda s: validate_voiceover(
+        s, must_mention=must_mention, max_words=max_words))
     try:
         script = call_llm_structured(
             prompt,
@@ -352,8 +453,7 @@ def compose(
             stage=STAGE,
             input_ref=input_ref,
             system=VOICEOVER_SYSTEM,
-            validate=lambda s: validate_voiceover(
-                s, must_mention=must_mention, max_words=max_words),
+            validate=checker,
         )
     except LLMFailure as exc:
         print(f"      [warn] script generation failed ({exc}) - using the template")
@@ -398,18 +498,8 @@ def guidance_dir(meal_id: str, week_start: date | str) -> Path:
     return path
 
 
-def cook_guidance(meal_id: str) -> dict | None:
-    """Segment list for the /cook page Next-button flow.
-
-    Uses the deterministic cook script: the page needs something instantly and
-    reliably, and a model rewrite would make "Next" wait on a second LLM call
-    with oily hands. Audio is synthesized lazily by ensure_segment_audio().
-    """
-    brief = meal_brief(meal_id)
-    if not brief or not brief["steps"]:
-        return None
-
-    script = template_cook_script(brief)
+def _script_to_guidance(meal_id: str, brief: dict,
+                        script: VoiceoverScript) -> dict:
     segments = []
     for index, segment in enumerate(script.segments):
         step_index = None
@@ -425,7 +515,6 @@ def cook_guidance(meal_id: str) -> dict | None:
             "step_index": step_index,
             "audio_url": f"/cook/{meal_id}/audio/{index}",
         })
-
     return {
         "meal_id": meal_id,
         "title": brief["title"],
@@ -434,16 +523,89 @@ def cook_guidance(meal_id: str) -> dict | None:
     }
 
 
+def detailed_cook_script(
+    meal_id: str,
+    *,
+    use_llm: bool = True,
+    force: bool = False,
+) -> tuple[dict, VoiceoverScript, bool] | None:
+    """Build (and cache) a detailed cook-along script for one meal.
+
+    First Start on the cook page pays for one LLM rewrite that folds transcript
+    cues into each method step. Later Next presses and reloads reuse the cache,
+    so oily hands are not waiting on the model every beat.
+    """
+    brief = meal_brief(meal_id)
+    if not brief or not brief["steps"]:
+        return None
+
+    directory = guidance_dir(meal_id, brief["week_start_date"])
+    cache_path = directory / "script.json"
+
+    if cache_path.exists() and not force:
+        try:
+            script = VoiceoverScript.model_validate_json(
+                cache_path.read_text(encoding="utf-8"))
+            return _script_to_guidance(meal_id, brief, script), script, False
+        except Exception:  # noqa: BLE001
+            pass
+
+    brief_text = format_meal_brief(brief)
+    script, by_model = compose(
+        COOK_VOICEOVER_PROMPT.format(
+            brief=brief_text,
+            max_words=config.COOK_SCRIPT_MAX_WORDS,
+            step_target=config.COOK_STEP_TARGET_WORDS,
+            step_max=config.COOK_STEP_MAX_WORDS,
+        ),
+        fallback=template_cook_script(brief),
+        must_mention=(brief["title"],),
+        max_words=config.COOK_SCRIPT_MAX_WORDS,
+        input_ref=f"cook:{meal_id}",
+        use_llm=use_llm,
+        validate=_validate_cook_script(brief, config.COOK_SCRIPT_MAX_WORDS),
+    )
+
+    # New wording invalidates previously spoken MP3s for this meal.
+    for stale in directory.glob("*.mp3"):
+        stale.unlink(missing_ok=True)
+    cache_path.write_text(script.model_dump_json(indent=2), encoding="utf-8")
+    (directory / "script.md").write_text(
+        script_markdown(script, brief_text, by_model), encoding="utf-8")
+
+    return _script_to_guidance(meal_id, brief, script), script, by_model
+
+
+def cook_guidance(meal_id: str, *, use_llm: bool = True,
+                  force: bool = False) -> dict | None:
+    """Segment list for the /cook page Next-button flow.
+
+    Detailed script is generated once (LLM + transcript cues) and cached under
+    VOICEOVER_DIR. Audio stays lazy: ensure_segment_audio() only speaks the beat
+    the cook just advanced to.
+    """
+    built = detailed_cook_script(meal_id, use_llm=use_llm, force=force)
+    if not built:
+        return None
+    guidance, _script, _by_model = built
+    return guidance
+
+
 def ensure_segment_audio(meal_id: str, index: int, *,
                          force: bool = False) -> Path | None:
     """Speak one guidance segment. Skip-if-present; return None on TTS failure."""
-    guidance = cook_guidance(meal_id)
+    # use_llm=False here would rebuild from template and fight the cache; load
+    # the cached detailed script (or build it once if Start somehow skipped).
+    guidance = cook_guidance(meal_id, use_llm=True, force=False)
     if not guidance or index < 0 or index >= len(guidance["segments"]):
         return None
 
     segment = guidance["segments"][index]
     directory = guidance_dir(meal_id, guidance["week_start_date"])
-    path = directory / f"{index:02d}-{_slug(segment['label'])}.mp3"
+    # Hash the spoken text into the filename so a richer script rewrite never
+    # reuses a thinner MP3 that happened to share the same label.
+    digest = hashlib.sha1(segment["text"].encode("utf-8")).hexdigest()[:10]
+    path = directory / f"{index:02d}-{_slug(segment['label'])}-{digest}.mp3"
     if path.exists() and not force:
         return path
 
@@ -555,12 +717,17 @@ def run_meal(meal_id: str, *, use_llm: bool = True, script_only: bool = False,
     brief_text = format_meal_brief(brief)
     script, by_model = compose(
         COOK_VOICEOVER_PROMPT.format(
-            brief=brief_text, max_words=config.COOK_SCRIPT_MAX_WORDS),
+            brief=brief_text,
+            max_words=config.COOK_SCRIPT_MAX_WORDS,
+            step_target=config.COOK_STEP_TARGET_WORDS,
+            step_max=config.COOK_STEP_MAX_WORDS,
+        ),
         fallback=template_cook_script(brief),
         must_mention=(brief["title"],),
         max_words=config.COOK_SCRIPT_MAX_WORDS,
         input_ref=f"meal:{meal_id}",
         use_llm=use_llm,
+        validate=_validate_cook_script(brief, config.COOK_SCRIPT_MAX_WORDS),
     )
 
     return _emit(script, brief_text, by_model,

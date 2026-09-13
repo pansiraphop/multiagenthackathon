@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 import config
@@ -264,13 +265,23 @@ class TemplateScripts(unittest.TestCase):
                 "steps": ["Blanch the spinach.", "Fry the paneer."]}
         text = spoken_text(template_cook_script(cook))
         self.assertLess(text.index("Blanch"), text.index("Fry"))
-        self.assertIn("Step 2.", text)
+        self.assertIn("Step 2 of 2.", text)
+        self.assertIn("heat, timing", text.lower())
+
+    def test_spoken_step_keeps_heat_and_spells_ranges(self) -> None:
+        from stages.voiceover import _spoken_step
+        line = _spoken_step(
+            2, 5,
+            "Warm the olive oil in a large skillet over medium heat for 8-10 min.")
+        self.assertIn("Step 2 of 5.", line)
+        self.assertIn("medium heat", line)
+        self.assertIn("8 to 10 minutes", line)
 
 
 class CookGuidance(unittest.TestCase):
     """What the /cook page Next button walks through."""
 
-    def guidance(self):
+    def guidance(self, use_llm=False):
         from stages.voiceover import cook_guidance
         with patch("stages.voiceover.meal_brief", return_value={
             "meal_id": "meal-1",
@@ -280,9 +291,18 @@ class CookGuidance(unittest.TestCase):
             "servings": 4,
             "reconstructed": False,
             "ingredients": ["spinach - 400 g"],
-            "steps": ["Blanch the spinach.", "Fry the paneer."],
-        }):
-            return cook_guidance("meal-1")
+            "steps": [
+                "Blanch the spinach briefly in boiling water over high heat.",
+                "Fry the paneer in ghee over medium heat until golden.",
+            ],
+            "source_caption": "",
+            "source_transcript": "Cook the spinach, then fry the paneer on medium.",
+        }), patch("stages.voiceover.guidance_dir",
+                  return_value=Path("/tmp/instacook-voice-test")):
+            Path("/tmp/instacook-voice-test").mkdir(parents=True, exist_ok=True)
+            for stale in Path("/tmp/instacook-voice-test").glob("*"):
+                stale.unlink()
+            return cook_guidance("meal-1", use_llm=use_llm, force=True)
 
     def test_segments_cover_opening_ingredients_steps_and_close(self) -> None:
         labels = [s["label"] for s in self.guidance()["segments"]]
@@ -301,10 +321,33 @@ class CookGuidance(unittest.TestCase):
         for seg in self.guidance()["segments"]:
             self.assertTrue(seg["audio_url"].endswith(f"/audio/{seg['index']}"))
 
+    def test_template_guidance_keeps_heat_cues(self) -> None:
+        steps = [s for s in self.guidance()["segments"]
+                 if s["label"].startswith("step-")]
+        self.assertIn("medium heat", steps[1]["text"])
+        self.assertIn("high heat", steps[0]["text"])
+
     def test_missing_meal_returns_none(self) -> None:
         from stages.voiceover import cook_guidance
         with patch("stages.voiceover.meal_brief", return_value=None):
             self.assertIsNone(cook_guidance("nope"))
+
+
+class FormatMealBrief(unittest.TestCase):
+    def test_includes_source_transcript_for_detail(self) -> None:
+        from stages.voiceover import format_meal_brief
+        text = format_meal_brief({
+            "title": "Rigatoni", "attended": 40, "servings": 4,
+            "reconstructed": False,
+            "ingredients": ["rigatoni - 500 g"],
+            "steps": ["Warm oil over medium heat."],
+            "source_caption": "Rigatoni like a pro",
+            "source_transcript": "Every amazing sauce starts with onion and garlic "
+                                 "over medium heat.",
+        })
+        self.assertIn("TRANSCRIPT:", text)
+        self.assertIn("medium heat", text)
+        self.assertIn("Warm oil over medium heat.", text)
 
 
 class Validation(unittest.TestCase):

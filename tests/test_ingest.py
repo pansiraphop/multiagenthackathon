@@ -53,6 +53,8 @@ class ParseReelsTest(unittest.TestCase):
 
 
 class PersistReelTest(unittest.TestCase):
+    @patch("lib.ingest._extract_and_confirm")
+    @patch("lib.ingest._notify")
     @patch("lib.ingest.log_eval")
     @patch("lib.ingest.db.insert_recipe")
     @patch("lib.ingest.db.select", side_effect=[[], []])
@@ -62,6 +64,8 @@ class PersistReelTest(unittest.TestCase):
         _select,
         insert_recipe,
         _log_eval,
+        notify,
+        extract_and_confirm,
     ) -> None:
         insert_recipe.return_value = {"id": "recipe-1"}
         reel = ReelIngest(
@@ -82,6 +86,8 @@ class PersistReelTest(unittest.TestCase):
             raw_transcript=None,
             extraction_status="pending",
         )
+        notify.assert_called_once()
+        extract_and_confirm.assert_called_once()
 
 
 class WebhookTest(unittest.TestCase):

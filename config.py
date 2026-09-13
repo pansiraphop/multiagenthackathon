@@ -165,7 +165,11 @@ WEEK_SCRIPT_TARGET_WORDS = 220
 WEEK_SCRIPT_MAX_WORDS = 320
 # A cook-along is read while someone is standing at a stove, so it runs long
 # by design — one step at a time, with the ingredients read out first.
-COOK_SCRIPT_MAX_WORDS = 700
+COOK_SCRIPT_MAX_WORDS = 1200
+# Per-step spoken beats can run longer once heat, timing and cues are filled in
+# from the method and transcript — still bounded so a single Next stay brief.
+COOK_STEP_TARGET_WORDS = 45
+COOK_STEP_MAX_WORDS = 90
 # eleven_multilingual_v2 rejects requests past ~5k characters. Split below it
 # and stitch the MP3s rather than silently truncating a sentence.
 TTS_MAX_CHARS = 4500

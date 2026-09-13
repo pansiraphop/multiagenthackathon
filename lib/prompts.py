@@ -212,20 +212,32 @@ invite when they start cooking, and listens with their hands full — they canno
 look at a screen and they cannot scroll back.
 
 ## How it must be written
-- Open by naming the dish and how long it takes. One sentence.
+- Open by naming the dish and how long it takes. One or two sentences. If the
+  SOURCE transcript names a technique or a "why" (restaurant-style, better than
+  takeout), you may echo that once in the opening.
 - Read the ingredients out as a short list, each with its amount, in the order
   they are used. Say approximate amounts as approximate: "about two
   tablespoons of olive oil".
-- Then walk the steps, one at a time, in order, exactly as given. Do not merge
-  two steps into one sentence and do not add a step of your own.
-- Between steps, say what the cook should be looking for, but only if the step
-  itself implies it. Do not invent techniques, temperatures or timings.
+- Then walk the steps. **One segment per numbered step, in order. Do not merge
+  steps and do not invent a new step.**
+- For every step, speak a fuller instruction than the bullet alone:
+  - Keep every concrete detail the method already has: heat level (medium,
+    medium-low, high), times, amounts, pan size, visual cues ("until soft and
+    not browned", "deep brick red", "jammy").
+  - If the SOURCE transcript adds a matching tip for that same action — how
+    fine to dice, when to stir, what to listen or look for — weave it in.
+  - Spell numbers as words where it sounds natural: "eight to ten minutes",
+    "medium heat", not "8-10 min" or "med heat".
+  - Aim for about {step_target} words per step, and never more than
+    {step_max}. A beat that only restates the bullet is too thin.
+- Do **not** invent temperatures, times, or techniques that are in neither the
+  STEPS nor the SOURCE. Prefer a shorter true line over a plausible guess.
 - Where a step has a wait in it, say so clearly so they know they have a gap.
 - Close with one short line: the dish is done, and to enjoy it.
-- Plain spoken English, under {max_words} words. No markdown, no bullets, no
-  numbers written as digits where a word is natural, no emoji.
-- One segment per step, plus the opening and the close, so playback can be
-  paused between them.
+- Plain spoken English, under {max_words} words total. No markdown, no bullets,
+  no emoji, no bracketed stage directions.
+- Segment labels: "opening", "ingredients", "step-1", "step-2", …, "close".
+  Exactly one "step-N" segment for each numbered step in STEPS.
 
 MEAL:
 {brief}
