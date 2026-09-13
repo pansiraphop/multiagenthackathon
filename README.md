@@ -360,8 +360,9 @@ test captions and ground-truth labels · `run_eval.py`.
 
 **Stage 7, if it happens:** whoever is free first. It touches nothing else.
 
-Agree on the schema and `normalize_ingredient()` **before splitting** — everything
-downstream assumes them, and Path B's planner needs the normalizer for pantry matching.
+The schema and the normalizer are **already settled and built** (see above) — everything
+downstream assumes them, so don't reimplement either. If you need a contract changed,
+change it here first and say so.
 
 To unblock each other: hand-insert ~6 `recipes` rows with varied cuisines and
 `est_time_minutes` from 15 to 60 so Path B can build the planner before extraction exists;
