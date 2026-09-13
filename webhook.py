@@ -38,13 +38,19 @@ async def verify_webhook(request: Request) -> str:
 
 
 def _has_open_question(sender_id: str) -> bool:
-    """Is stage 5b waiting on an answer from this person?"""
+    """Is stage 5b waiting on an answer from this person?
+
+    OPEN_STATUS is imported rather than written out: it is "sent", not "open",
+    and hardcoding the wrong value here fails silently — every answer would be
+    routed to the concierge and the follow-up loop would never close.
+    """
     try:
         from lib import db
+        from stages.followup import OPEN_STATUS
 
         return any(
             row.get("recipient_id") in (None, sender_id)
-            for row in db.select("followups", "*", status="open")
+            for row in db.select("followups", "*", status=OPEN_STATUS)
         )
     except Exception:  # noqa: BLE001 - never let this decide by crashing
         return False
