@@ -24,7 +24,6 @@ from datetime import datetime
 import config
 from lib import db
 from lib.evals import format_report
-from lib.llm import call_llm_structured
 from lib.normalize import (
     clean_source_text,
     dedupe_ingredients,
@@ -32,15 +31,8 @@ from lib.normalize import (
     render_amount,
     to_ingredient_row,
 )
-from lib.prompts import EXTRACTION_PROMPT, EXTRACTION_SYSTEM
-from lib.schemas import (
-    ExtractedRecipe,
-    advance_prep,
-    attended_minutes,
-    needs_reconstruction,
-    validate_recipe,
-)
-from stages import availability, plan
+from lib.schemas import advance_prep, attended_minutes
+from stages import availability, extract, plan
 from seed import seed_pantry
 
 INPUT_REF = "integration-test"
@@ -152,50 +144,24 @@ def fail(message: str) -> None:
 # ---------------------------------------------------------------------------
 
 def run_stage_1() -> list[dict]:
-    """Extract each caption and write recipes + recipe_ingredients."""
+    """Insert pending rows the way ingestion does, then run the REAL extractor.
+
+    Deliberately calls stages.extract.extract_recipe rather than reimplementing
+    extraction here — otherwise this tests a copy of stage 1, not stage 1.
+    """
     print("[1/6] extraction")
     written: list[dict] = []
 
     for caption, label in CAPTIONS:
-        source = clean_source_text(caption)
-        parsed = call_llm_structured(
-            EXTRACTION_PROMPT.format(source_text=source),
-            ExtractedRecipe,
-            stage="extraction",
-            input_ref=INPUT_REF,
-            validate=validate_recipe,
-            system=EXTRACTION_SYSTEM,
-        )
-
-        recipe = db.insert_recipe(
-            raw_caption=source,
+        pending = db.insert_recipe(
+            raw_caption=clean_source_text(caption),
             source_url=f"https://instagram.com/reel/{INPUT_REF}-{label}",
-            title=parsed.title,
-            cuisine=parsed.cuisine,
-            est_time_minutes=parsed.est_time_minutes,
-            total_time_minutes=parsed.total_time_minutes,
-            advance_prep_minutes=parsed.advance_prep_minutes,
-            servings=parsed.servings,
-            steps=parsed.steps,
-            extraction_status="success",
-            provenance="reconstructed" if needs_reconstruction(parsed) else "transcript",
-            source_sufficiency=parsed.source_sufficiency,
+            extraction_status="pending",
         )
-
-        rows = dedupe_ingredients([
-            to_ingredient_row(i.name, i.quantity, i.unit,
-                              i.qualitative_note, i.is_approximate)
-            for i in parsed.ingredients
-        ])
-        db.insert_ingredients(recipe["id"], rows)
-
-        approx = sum(1 for r in rows if r["is_approximate"])
-        prep = (f"  +{parsed.advance_prep_minutes // 60}h ahead"
-                if parsed.advance_prep_minutes else "")
-        print(f"      {parsed.title[:32]:32s} active {parsed.est_time_minutes:>3} "
-              f"attended {parsed.total_time_minutes:>3}  "
-              f"{len(rows)} ingr ({approx} approx){prep}")
-        written.append(recipe)
+        result = extract.extract_recipe(pending)
+        if result is None:
+            fail(f"{label}: extractor failed and marked the row failed")
+        written.append(result)
 
     if len(written) != len(CAPTIONS):
         fail(f"expected {len(CAPTIONS)} recipes, wrote {len(written)}")

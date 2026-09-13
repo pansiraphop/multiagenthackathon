@@ -82,7 +82,18 @@ def _resolve_targets(args: argparse.Namespace) -> list[dict]:
     raise SystemExit("Pick one of --list, --best N, --id, --url, or --all")
 
 
-def _extract_from_source(source_text: str, input_ref: str) -> ExtractedRecipe:
+def _extract_from_source(
+    source_text: str, input_ref: str
+) -> tuple[ExtractedRecipe, bool, str]:
+    """Return (recipe, was_reconstructed, source_sufficiency_of_the_ORIGINAL).
+
+    Both extra values matter and neither can be recovered from the recipe
+    afterwards. A successful reconstruction produces a complete-looking recipe,
+    so asking needs_reconstruction() about the FINAL result answers "no" and
+    silently labels a web-rebuilt recipe as coming from the reel. And the
+    rebuilt pass reports its own sufficiency as 'complete', which would erase
+    the honest assessment of the original source that the eval split needs.
+    """
     parsed = call_llm_structured(
         EXTRACTION_PROMPT.format(source_text=source_text),
         ExtractedRecipe,
@@ -91,8 +102,9 @@ def _extract_from_source(source_text: str, input_ref: str) -> ExtractedRecipe:
         validate=validate_recipe,
         system=EXTRACTION_SYSTEM,
     )
+    source_sufficiency = parsed.source_sufficiency
     if not needs_reconstruction(parsed):
-        return parsed
+        return parsed, False, source_sufficiency
 
     print("      source thin — trying reconstruction")
     identity = call_llm_structured(
@@ -103,7 +115,7 @@ def _extract_from_source(source_text: str, input_ref: str) -> ExtractedRecipe:
         system=EXTRACTION_SYSTEM,
     )
     if not identity.confident or not identity.dish_name:
-        return parsed
+        return parsed, False, source_sufficiency
 
     prose = call_llm_with_search(
         RECONSTRUCT_PROMPT.format(
@@ -114,9 +126,9 @@ def _extract_from_source(source_text: str, input_ref: str) -> ExtractedRecipe:
         input_ref=f"reconstruct:{input_ref}",
     )
     if not prose:
-        return parsed
+        return parsed, False, source_sufficiency
 
-    return call_llm_structured(
+    rebuilt = call_llm_structured(
         EXTRACTION_PROMPT.format(source_text=prose),
         ExtractedRecipe,
         stage=STAGE,
@@ -124,6 +136,7 @@ def _extract_from_source(source_text: str, input_ref: str) -> ExtractedRecipe:
         validate=validate_recipe,
         system=EXTRACTION_SYSTEM,
     )
+    return rebuilt, True, source_sufficiency
 
 
 def extract_recipe(row: dict, *, dry_run: bool = False) -> dict | None:
@@ -138,13 +151,16 @@ def extract_recipe(row: dict, *, dry_run: bool = False) -> dict | None:
 
     input_ref = row.get("source_url") or row["id"]
     try:
-        parsed = _extract_from_source(decision.source_text, input_ref)
+        parsed, reconstructed, source_sufficiency = _extract_from_source(
+            decision.source_text, input_ref)
     except LLMFailure as exc:
         db.update("recipes", row["id"], {"extraction_status": "failed"})
         print(f"      FAILED: {exc}")
         return None
 
-    provenance = "reconstructed" if needs_reconstruction(parsed) else "transcript"
+    # Based on whether the reconstruction path actually RAN, not on how
+    # complete the end result looks.
+    provenance = "reconstructed" if reconstructed else "transcript"
     # Keep original caption/transcript; overwrite structured fields.
     db.update("recipes", row["id"], {
         "title": parsed.title,
@@ -156,7 +172,7 @@ def extract_recipe(row: dict, *, dry_run: bool = False) -> dict | None:
         "steps": parsed.steps,
         "extraction_status": "success",
         "provenance": provenance,
-        "source_sufficiency": parsed.source_sufficiency,
+        "source_sufficiency": source_sufficiency,
     })
     db.delete_where("recipe_ingredients", recipe_id=row["id"])
     rows = dedupe_ingredients([

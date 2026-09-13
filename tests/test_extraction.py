@@ -10,6 +10,7 @@ time gets scheduled into a gap it cannot possibly fit.
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import config
 from lib.normalize import (
@@ -20,7 +21,9 @@ from lib.normalize import (
     render_amount,
     to_ingredient_row,
 )
+from stages.extract import _extract_from_source
 from lib.schemas import (
+    DishIdentification,
     ExtractedRecipe,
     Ingredient,
     advance_prep,
@@ -259,6 +262,80 @@ class RowBuilding(unittest.TestCase):
     def test_non_food_identified_but_allowlist_respected(self) -> None:
         self.assertTrue(is_non_food("reserved pasta water"))
         self.assertFalse(is_non_food("coconut water"))
+
+
+class Provenance(unittest.TestCase):
+    """A reconstructed recipe must say so.
+
+    The trap: reconstruction SUCCEEDS, so the final recipe looks complete, so
+    asking needs_reconstruction() about it answers "no" — and a recipe rebuilt
+    from web research gets labelled as coming from the reel. That inverts the
+    flag exactly when it matters, and the calendar then can't warn the cook.
+    """
+
+    THIN = ExtractedRecipe(
+        title="Mystery Noodles", cuisine="other",
+        est_time_minutes=20, total_time_minutes=20, advance_prep_minutes=0,
+        servings=2, steps=[],
+        ingredients=[Ingredient(name="noodle", quantity=200, unit="g")],
+        source_sufficiency="insufficient",
+    )
+    FULL = ExtractedRecipe(
+        title="Gochujang Butter Noodles", cuisine="korean",
+        est_time_minutes=20, total_time_minutes=20, advance_prep_minutes=0,
+        servings=2, steps=["Boil.", "Toss.", "Serve."],
+        ingredients=[
+            Ingredient(name="noodle", quantity=200, unit="g"),
+            Ingredient(name="gochujang", quantity=2, unit="tbsp"),
+            Ingredient(name="butter", quantity=2, unit="tbsp"),
+        ],
+        source_sufficiency="complete",
+    )
+    IDENTITY = DishIdentification(
+        dish_name="gochujang butter noodles", confident=True,
+        reasoning="named in the caption")
+
+    def run_extract(self, structured_results, search_result="Title: x"):
+        with patch("stages.extract.call_llm_structured",
+                   side_effect=structured_results),              patch("stages.extract.call_llm_with_search",
+                   return_value=search_result):
+            return _extract_from_source("some caption", "ref")
+
+    def test_reconstruction_is_reported_even_though_it_succeeded(self) -> None:
+        recipe, reconstructed, _ = self.run_extract(
+            [self.THIN, self.IDENTITY, self.FULL])
+        self.assertTrue(reconstructed, "the rebuilt recipe must be labelled")
+        self.assertEqual(recipe.title, "Gochujang Butter Noodles")
+
+    def test_original_sufficiency_survives_reconstruction(self) -> None:
+        """The rebuilt pass says 'complete'; the SOURCE was 'insufficient'.
+
+        The eval split depends on this: only transcript-sufficient reels can be
+        scored against ground truth.
+        """
+        _, _, sufficiency = self.run_extract(
+            [self.THIN, self.IDENTITY, self.FULL])
+        self.assertEqual(sufficiency, "insufficient")
+
+    def test_good_source_is_not_reconstructed(self) -> None:
+        recipe, reconstructed, sufficiency = self.run_extract([self.FULL])
+        self.assertFalse(reconstructed)
+        self.assertEqual(sufficiency, "complete")
+        self.assertIs(recipe, self.FULL)
+
+    def test_unidentifiable_dish_is_not_reconstructed(self) -> None:
+        """Never invent a recipe with no relationship to the reel."""
+        unsure = DishIdentification(dish_name=None, confident=False,
+                                    reasoning="just a plate of food")
+        recipe, reconstructed, _ = self.run_extract([self.THIN, unsure])
+        self.assertFalse(reconstructed)
+        self.assertIs(recipe, self.THIN)
+
+    def test_failed_search_falls_back_to_the_thin_recipe(self) -> None:
+        recipe, reconstructed, _ = self.run_extract(
+            [self.THIN, self.IDENTITY], search_result=None)
+        self.assertFalse(reconstructed)
+        self.assertIs(recipe, self.THIN)
 
 
 if __name__ == "__main__":
