@@ -171,6 +171,13 @@ class Description(unittest.TestCase):
         text = self.body(o=order(method="browserbase"))
         self.assertNotIn("search link", text)
 
+    def test_mixed_tier_is_a_real_cart_with_leftovers_flagged(self) -> None:
+        """A resumed top-up that failed: 26 in the cart, 2 to find by hand."""
+        text = self.body(o=order(method="mixed", item_count=26,
+                                 unresolved_item_count=2))
+        self.assertNotIn("search link", text)
+        self.assertIn("2 item(s) need picking by hand", text)
+
     def test_no_order_degrades_gracefully(self) -> None:
         """Stage 5 is unfinished. The meal event must still be useful."""
         text = self.body(o=None)

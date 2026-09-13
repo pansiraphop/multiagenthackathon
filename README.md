@@ -120,8 +120,12 @@ stages depend on. Add whatever else you need.
 | `cook_slots` | `week_start_date`, `slot_start`, `slot_end`, `duration_minutes`, `suitability_score`, `assigned` | 2 |
 | `meal_plan` | `id`, `recipe_id`, `cook_slot_id`, `week_start_date`, `planned_start_time`, `planned_end_time`, `score`, `score_reason`, `calendar_event_id`, `status` | 3, 6 |
 | `shopping_list` | `week_start_date`, `ingredient_name`, `quantity_needed`, `unit`, `resolution_status` | 4, 5 |
-| `instacart_orders` | `week_start_date`, `cart_url`, `item_count`, `delivery_window_start`, `delivery_window_end`, `delivery_event_id`, `method` | 5, 6 |
+| `instacart_orders` | `week_start_date`, `cart_url`, `item_count`, `unresolved_item_count`, `delivery_window_start`, `delivery_window_end`, `delivery_event_id`, `method` | 5, 6 |
 | `eval_log` | `stage`, `input_ref`, `success`, `retry_count`, `duration_ms`, `error_message` | all |
+
+`shopping_list.resolution_status` is `pending` → `added_to_cart` (in this week's cart, never
+ordered again) / `failed` (browser couldn't add it) / `fallback_link` (search link only).
+`instacart_orders.method` is `browser_automation` / `fallback_links` / `mixed`.
 
 `meal_plan.id` is the stable handle for a single meal. **The cook-session URL in §6 is
 built from it**, so don't regenerate those rows once the calendar has been written.
@@ -232,6 +236,13 @@ cuisines already used that week. A recipe that exceeds every window must be repo
 unschedulable, not silently dropped. Walking slots in time order means
 soonest-expiring ingredients land on the earliest evenings for free.
 
+**Two adjustments happen during the walk, not in the base score, because both depend on
+what has already been picked.** Cuisines already used are discounted by
+`DIVERSITY_PENALTY` (variety), and a recipe gets `W_SHARED_INGREDIENTS` × the fraction of
+its ingredients another chosen meal already needs (cost — one bunch of coriander across
+two dinners beats two half-used bunches). The shared bonus is deliberately smaller than
+`W_EXPIRY`, so a cheaper shop never outranks rescuing food that expires tomorrow.
+
 One LLM call per meal generates `score_reason` — a one-sentence human-readable "why this
 meal, why now" for the calendar description. Falls back to a template if it fails.
 
@@ -255,6 +266,14 @@ recipe wants it by weight and another by count but reads as a contradiction.
 `is_non_food()` rows are filtered out: water, pasta water and ice are real recipe
 ingredients but must never reach a cart.
 
+**Re-running mid-week does not re-buy the week's groceries.** The table is
+delete-then-insert, so a reel arriving on Wednesday rebuilds the list — and without care
+every row would read `pending` again and stage 5 would order everything twice.
+`carry_over_statuses()` keeps `added_to_cart` for any row the current cart already covers,
+and only when the new requirement is *not larger* than what was already carted. If two
+more meals now need spinach, that row goes back to `pending` so the shortfall still gets
+bought.
+
 ### 5 · `instacart.py` — cart + delivery window
 Reads `shopping_list`; writes `instacart_orders`.
 
@@ -272,6 +291,31 @@ A browser-session or expired-login failure falls back to links for the whole lis
 of dead-ending the pipeline. Run
 `python scripts/instacart_probe.py tomato` once to log in through Browserbase's live view,
 confirm the live selectors, and persist the resulting `BROWSERBASE_CONTEXT_ID`.
+
+**One cart per week — the guard is the expensive thing to get wrong.** Reels arriving all
+week accumulate into a single order, so re-running stage 5 must never add the same
+groceries again. The decision comes from the existing `instacart_orders` row plus each
+`shopping_list.resolution_status`:
+
+| Existing state | What a re-run does |
+|---|---|
+| Cart built, nothing pending | Skips entirely, logs it, touches no browser |
+| Cart built, some rows pending | Resumes — adds *only* the missing rows |
+| `fallback_links` only | Retries the full browser cart; nothing was ever added, so nothing can duplicate |
+| `--force` | Re-adds everything, and says out loud that it may duplicate |
+
+Two more cost details. The same ingredient can appear twice with different units (`250 g
+butter`, `3 tbsp butter`) — that is one product in a cart, so it is searched once and both
+rows are marked. And a row with a blank ingredient name is refused rather than searched,
+because an empty query adds whatever Instacart happens to show first.
+
+`method` therefore has a third value: **`mixed`**, when a resumed top-up fails and the week
+ends up with a real cart plus a few link-only items. `item_count` is counted from the
+table, not from the run, so a resumed order reports the whole week's cart rather than just
+the items it topped up.
+
+`--dry-run` prints the whole decision — dedupe, guard state, and every URL it would open —
+without a browser session, a database write, or even an `eval_log` row.
 
 Pick a delivery window that ends comfortably before the earliest cook slot. If nothing
 feasible exists, re-run `plan.py` excluding that slot so the meal moves later, and log the
@@ -366,7 +410,9 @@ The brief covers: architecture and why availability precedes planning · failure
 (retry wrapper, external wrapper, availability fallback, Instacart tiers, per-item
 isolation) · the measured numbers · and **known limitations stated plainly** — no
 cross-dimension unit conversion, qualitative amounts approximated, free/busy can't tell
-"free" from "free but not at home". Naming the limits ourselves beats hoping nobody asks.
+"free" from "free but not at home", and the cart takes the first search result rather than
+comparing brands or sizes, so it optimizes *what* to buy rather than which product to buy.
+Naming the limits ourselves beats hoping nobody asks.
 
 **Instacart reliability note:** Browserbase was chosen because the formal Instacart API
 path was unavailable during the hackathon window. Browser action-taking has more

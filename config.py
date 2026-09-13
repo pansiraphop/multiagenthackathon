@@ -57,6 +57,16 @@ INSTACART_RETAILER = os.environ.get("INSTACART_RETAILER", "")
 
 APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8000")
 
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
+ELEVENLABS_AGENT_ID = os.environ.get("ELEVENLABS_AGENT_ID", "")
+ELEVENLABS_API_BASE = os.environ.get("ELEVENLABS_API_BASE", "https://api.elevenlabs.io")
+# Rachel, on every ElevenLabs account by default. Override with a voice id or
+# a voice name from `python -m stages.voiceover --voices`.
+ELEVENLABS_VOICE = os.environ.get("ELEVENLABS_VOICE", "21m00Tcm4TlvDq8ikWAM")
+ELEVENLABS_MODEL = os.environ.get("ELEVENLABS_MODEL", "eleven_multilingual_v2")
+ELEVENLABS_OUTPUT_FORMAT = os.environ.get("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128")
+ELEVENLABS_TIMEOUT_SECONDS = _env_int("ELEVENLABS_TIMEOUT_SECONDS", 120)
+
 # Instagram webhook ingestion. Caption is always primary; local Whisper is
 # best-effort and may be switched off without disabling the webhook.
 META_VERIFY_TOKEN = os.environ.get("META_VERIFY_TOKEN", "")
@@ -87,8 +97,16 @@ W_EXPIRY = 0.55               # weights should sum to 1.0
 W_OVERLAP = 0.25
 W_COMPLETENESS = 0.20
 DIVERSITY_PENALTY = 0.60      # multiplier when the cuisine is already used
+# Bonus for a recipe whose ingredients are already needed by a meal picked
+# earlier this week: one bunch of coriander across two dinners costs less than
+# two half-used bunches. Applied against the fraction shared, so it nudges
+# rather than overrides expiry urgency.
+W_SHARED_INGREDIENTS = 0.20
 
 # --- delivery (stage 5) ----------------------------------------------------
+# One cart per week. Stage 4 keeps this status on re-run so an ingredient that
+# is already in the cart is never ordered a second time.
+CART_READY_STATUS = "added_to_cart"
 DELIVERY_LEAD_HOURS = 4       # earliest realistic turnaround from ordering
 DELIVERY_BUFFER_HRS = 2       # margin between delivery end and first cook slot
 BROWSER_SELECTOR_TIMEOUT_MS = 8000
@@ -115,6 +133,21 @@ EST_TIME_MIN = 5
 EST_TIME_MAX = 180            # active hands-on work
 TOTAL_TIME_MAX = 600          # attended span: a 5-hour braise is real
 MAX_ADVANCE_PREP_MINUTES = 4320   # 3 days covers brining and long ferments
+
+# --- voiceover (stage 7) ---------------------------------------------------
+VOICEOVER_DIR = os.environ.get("VOICEOVER_DIR", "out/voiceover")
+# Measured on narration, not on reading speed: a demo voice that races is
+# worse than a long one, so the estimate is deliberately conservative.
+SPOKEN_WORDS_PER_MINUTE = 150
+# The demo is two minutes and the voiceover is not allowed to eat all of it.
+WEEK_SCRIPT_TARGET_WORDS = 220
+WEEK_SCRIPT_MAX_WORDS = 320
+# A cook-along is read while someone is standing at a stove, so it runs long
+# by design — one step at a time, with the ingredients read out first.
+COOK_SCRIPT_MAX_WORDS = 700
+# eleven_multilingual_v2 rejects requests past ~5k characters. Split below it
+# and stitch the MP3s rather than silently truncating a sentence.
+TTS_MAX_CHARS = 4500
 
 
 def week_start(d: date | None = None) -> date:

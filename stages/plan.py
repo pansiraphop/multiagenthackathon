@@ -107,6 +107,21 @@ def base_score(recipe: dict, pantry: dict[str, dict],
     )
 
 
+def shared_fraction(recipe: dict, already_needed: set[str]) -> float:
+    """0..1 — how much of this recipe the week is already buying anyway.
+
+    Two meals that both want ginger need one piece of ginger, not two. This is
+    the cheapest lever the planner has on grocery cost, and unlike pantry
+    overlap it depends on what has already been picked, so it can only be
+    applied during the slot walk.
+    """
+    ingredients = _shoppable(recipe)
+    if not ingredients or not already_needed:
+        return 0.0
+    shared = sum(1 for i in ingredients if i["name"] in already_needed)
+    return shared / len(ingredients)
+
+
 def expiring_ingredients(recipe: dict, pantry: dict[str, dict],
                          today: date | None = None) -> list[tuple[str, int]]:
     """(name, days until expiry) for this recipe's soon-to-go items, soonest first."""
@@ -145,7 +160,16 @@ def assign(
     available = sorted(slots, key=lambda s: s["slot_start"])
     remaining = list(recipes)
     used_cuisines: set[str] = set()
+    already_needed: set[str] = set()
     assignments: list[dict] = []
+
+    def adjusted_score(recipe: dict) -> float:
+        """The score this recipe competes on right now, given earlier picks."""
+        score = scores[recipe["id"]]
+        if recipe.get("cuisine") in used_cuisines:
+            score *= config.DIVERSITY_PENALTY
+        score += config.W_SHARED_INGREDIENTS * shared_fraction(recipe, already_needed)
+        return round(score, 4)
 
     for slot in available:
         if len(assignments) >= config.MEALS_PER_WEEK:
@@ -168,17 +192,9 @@ def assign(
         if not candidates:
             continue
 
-        def adjusted(recipe: dict) -> tuple[float, str]:
-            score = scores[recipe["id"]]
-            if recipe.get("cuisine") in used_cuisines:
-                score *= config.DIVERSITY_PENALTY
-            # id is the tie-break so the same inputs always give the same plan
-            return (-round(score, 6), recipe["id"])
-
-        pick = min(candidates, key=adjusted)
-        score = scores[pick["id"]]
-        if pick.get("cuisine") in used_cuisines:
-            score = round(score * config.DIVERSITY_PENALTY, 4)
+        # id is the tie-break so the same inputs always give the same plan
+        pick = min(candidates, key=lambda r: (-adjusted_score(r), r["id"]))
+        score = adjusted_score(pick)
 
         minutes = attended_minutes(pick)
         assignments.append({
@@ -191,6 +207,7 @@ def assign(
         })
         remaining.remove(pick)
         used_cuisines.add(pick.get("cuisine") or "")
+        already_needed.update(i["name"] for i in _shoppable(pick))
 
     # A long braise may genuinely not fit any window this week. Report it
     # rather than dropping it silently — the user should know why it's missing.

@@ -136,6 +136,32 @@ def build(week_start: date) -> tuple[list[dict], list[tuple[str, str]], int]:
     return to_buy, covered, len(totals)
 
 
+def carry_over_statuses(week: str, to_buy: list[dict]) -> list[str]:
+    """Keep `added_to_cart` for rows this week's cart already covers.
+
+    Stage 4 is delete-then-insert, so without this a re-run mid-week (a new
+    reel arrives, the plan changes) would reset every row to pending and stage
+    5 would order the same groceries twice. The quantity check is what makes it
+    safe: if the new plan needs MORE of something than was already carted, the
+    row goes back to pending so the shortfall still gets bought.
+    """
+    previous = {
+        (row["ingredient_name"], row["unit"]): row
+        for row in db.select("shopping_list", "*", week_start_date=week)
+    }
+    statuses = []
+    for row in to_buy:
+        prior = previous.get((row["ingredient_name"], row["unit"]))
+        carried = (
+            prior is not None
+            and prior.get("resolution_status") == config.CART_READY_STATUS
+            and prior.get("quantity_needed") is not None
+            and float(prior["quantity_needed"]) >= float(row["quantity_needed"])
+        )
+        statuses.append(config.CART_READY_STATUS if carried else "pending")
+    return statuses
+
+
 def run(week_start: date | None = None, show_only: bool = False,
         verbose: bool = False) -> list[dict]:
     week_start = week_start or config.week_start()
@@ -164,12 +190,18 @@ def run(week_start: date | None = None, show_only: bool = False,
     if show_only:
         return to_buy
 
+    rows = [dict(r, week_start_date=week, resolution_status=status)
+            for r, status in zip(to_buy, carry_over_statuses(week, to_buy))]
+    in_cart = sum(1 for r in rows
+                  if r["resolution_status"] == config.CART_READY_STATUS)
+
     db.delete_where("shopping_list", week_start_date=week)
-    rows = [dict(r, week_start_date=week) for r in to_buy]
     written = db.insert("shopping_list", rows) if rows else []
 
     log_eval(STAGE, week, True)
     print(f"      wrote {len(written)} shopping_list rows")
+    if in_cart:
+        print(f"      {in_cart} already in this week's cart - stage 5 will skip them")
     return written
 
 

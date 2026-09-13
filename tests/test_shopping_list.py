@@ -11,8 +11,14 @@ ingredient on it three times.
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
-from stages.shopping_list import required_totals, subtract_pantry
+from stages import shopping_list
+from stages.shopping_list import (
+    carry_over_statuses,
+    required_totals,
+    subtract_pantry,
+)
 
 WEEK = "2026-09-14"
 
@@ -183,6 +189,54 @@ class PantrySubtraction(unittest.TestCase):
             self.assertTrue(row["ingredient_name"])
             self.assertGreater(row["quantity_needed"], 0)
             self.assertTrue(row["unit"])
+
+
+class CartCarryOver(unittest.TestCase):
+    """Re-running stage 4 mid-week must not send stage 5 shopping again.
+
+    Stage 4 is delete-then-insert, so a new reel arriving on Wednesday rebuilds
+    the list. Without carry-over every row would read `pending` and the week's
+    groceries would be ordered a second time.
+    """
+
+    def rows(self, *specs):
+        return [{"ingredient_name": n, "unit": u, "quantity_needed": q,
+                 "resolution_status": s} for n, q, u, s in specs]
+
+    def carry(self, previous, to_buy):
+        with patch.object(shopping_list.db, "select", return_value=previous):
+            return carry_over_statuses(WEEK, to_buy)
+
+    def test_item_already_in_the_cart_is_not_bought_again(self) -> None:
+        previous = self.rows(("spinach", 400, "g", "added_to_cart"))
+        to_buy = self.rows(("spinach", 400, "g", "pending"))
+        self.assertEqual(self.carry(previous, to_buy), ["added_to_cart"])
+
+    def test_a_bigger_requirement_goes_back_to_pending(self) -> None:
+        """Two more meals now need spinach, so the shortfall still gets bought."""
+        previous = self.rows(("spinach", 400, "g", "added_to_cart"))
+        to_buy = self.rows(("spinach", 900, "g", "pending"))
+        self.assertEqual(self.carry(previous, to_buy), ["pending"])
+
+    def test_a_smaller_requirement_stays_covered(self) -> None:
+        previous = self.rows(("spinach", 900, "g", "added_to_cart"))
+        to_buy = self.rows(("spinach", 400, "g", "pending"))
+        self.assertEqual(self.carry(previous, to_buy), ["added_to_cart"])
+
+    def test_new_and_failed_items_are_pending(self) -> None:
+        previous = self.rows(("spinach", 400, "g", "fallback_link"))
+        to_buy = self.rows(("spinach", 400, "g", "pending"),
+                           ("garlic", 2, "unit", "pending"))
+        self.assertEqual(self.carry(previous, to_buy), ["pending", "pending"])
+
+    def test_a_different_unit_is_not_treated_as_covered(self) -> None:
+        previous = self.rows(("butter", 250, "g", "added_to_cart"))
+        to_buy = self.rows(("butter", 3, "tbsp", "pending"))
+        self.assertEqual(self.carry(previous, to_buy), ["pending"])
+
+    def test_first_run_of_the_week_is_all_pending(self) -> None:
+        to_buy = self.rows(("spinach", 400, "g", "pending"))
+        self.assertEqual(self.carry([], to_buy), ["pending"])
 
 
 class UnitRendering(unittest.TestCase):

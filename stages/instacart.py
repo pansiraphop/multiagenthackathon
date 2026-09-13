@@ -31,6 +31,26 @@ CART_STATE_SELECTORS = (
 )
 
 
+def _cartable(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Return (one row per product to search, rows that can't be searched).
+
+    Two things happen here, both of them cost control. A blank ingredient name
+    would search for nothing and add whatever Instacart shows first, so those
+    rows are refused rather than guessed at. And the same ingredient can appear
+    twice with different units (250 g butter for one recipe, 3 tbsp for
+    another) — that is one product in a cart, not two, so it is searched once.
+    """
+    unique: dict[str, dict] = {}
+    unusable: list[dict] = []
+    for row in rows:
+        name = (row.get("ingredient_name") or "").strip()
+        if not name:
+            unusable.append(row)
+            continue
+        unique.setdefault(name, row)
+    return list(unique.values()), unusable
+
+
 def search_url(ingredient_name: str) -> str:
     query = urllib.parse.quote(ingredient_name.strip(), safe="")
     if config.INSTACART_RETAILER:
@@ -190,45 +210,61 @@ def _delivery_window(
 
 
 def _write_order(week_start: date, result: dict) -> dict:
+    week = week_start.isoformat()
     start, end = _delivery_window(week_start)
     if start is None or end is None:
         log_eval(
             STAGE,
-            week_start.isoformat(),
+            week,
             False,
             error_message="no feasible delivery window before earliest meal",
         )
-    row = {
-        "week_start_date": week_start.isoformat(),
-        "cart_url": result["cart_url"],
-        "item_count": len(result["added"]),
-        "unresolved_item_count": len(result["failed"]),
-        "method": result["method"],
-        "delivery_window_start": start.isoformat() if start else None,
-        "delivery_window_end": end.isoformat() if end else None,
-    }
-    db.delete_where("instacart_orders", week_start_date=week_start.isoformat())
-    written = db.insert("instacart_orders", row)[0]
 
     def mark(item: dict, status: str) -> None:
         # Stage 4 is delete-then-insert and may rerun while a long browser
-        # session is active, replacing UUIDs. Update through its stable key.
+        # session is active, replacing UUIDs. Update through its stable key,
+        # and by name only: one cart product can cover two unit rows.
         db.update_where(
             "shopping_list",
             {"resolution_status": status},
-            week_start_date=week_start.isoformat(),
+            week_start_date=week,
             ingredient_name=item["ingredient_name"],
-            unit=item["unit"],
         )
 
     for item in result["added"]:
-        mark(item, "added_to_cart")
+        mark(item, config.CART_READY_STATUS)
     failed_status = (
         "fallback_link" if result["method"] == "fallback_links" else "failed"
     )
     for item in result["failed"]:
         mark(item, failed_status)
-    return written
+
+    # Count from the table rather than from this run, so a resumed run reports
+    # the whole week's cart instead of just the items it topped up.
+    statuses = [
+        row["resolution_status"]
+        for row in db.select("shopping_list", "resolution_status", week_start_date=week)
+    ]
+    in_cart = sum(s == config.CART_READY_STATUS for s in statuses)
+    # A resumed top-up that fails leaves a real cart plus a few link-only
+    # items. Calling that "fallback_links" would understate the week.
+    method = result["method"]
+    cart_url = result["cart_url"]
+    if method == "fallback_links" and in_cart:
+        method = "mixed"
+        # Stage 6 should link to the real cart, not to one search page.
+        cart_url = f"{INSTACART_HOME}/store/cart"
+    row = {
+        "week_start_date": week,
+        "cart_url": cart_url,
+        "item_count": in_cart,
+        "unresolved_item_count": len(statuses) - in_cart,
+        "method": method,
+        "delivery_window_start": start.isoformat() if start else None,
+        "delivery_window_end": end.isoformat() if end else None,
+    }
+    db.delete_where("instacart_orders", week_start_date=week)
+    return db.insert("instacart_orders", row)[0]
 
 
 def run(
@@ -241,29 +277,56 @@ def run(
 ) -> dict | None:
     week_start = week_start or config.week_start()
     week = week_start.isoformat()
-    items = db.select("shopping_list", "*", week_start_date=week)
+    rows = db.select("shopping_list", "*", week_start_date=week)
+    items, unusable = _cartable(rows)
     if limit is not None:
         items = items[:max(0, limit)]
 
-    print(f"[5/6] instacart     week of {week_start} | {len(items)} items")
-    if not items:
+    print(f"[5/6] instacart     week of {week_start} | {len(rows)} rows -> "
+          f"{len(items)} products to search")
+    if not rows:
         print("      no shopping_list rows - run stage 4 first")
-        log_eval(STAGE, week, False, error_message="no shopping_list rows")
+        if not dry_run:
+            log_eval(STAGE, week, False, error_message="no shopping_list rows")
         return None
+    for row in unusable:
+        print(f"      [skip] row {row.get('id')} has no ingredient name")
+        if not dry_run:
+            log_eval(STAGE, str(row.get("id")), False,
+                     error_message="shopping_list row has no ingredient_name")
+
+    # One cart per week. Reels arriving all week accumulate into a single
+    # order, so a second run must never re-add what is already in the cart.
+    existing = db.select("instacart_orders", "*", week_start_date=week)
+    order = existing[0] if existing else None
+    if order and not force:
+        if order.get("method") == "browser_automation":
+            pending = [i for i in items
+                       if i.get("resolution_status") != config.CART_READY_STATUS]
+            if not pending:
+                print(f"      already ordered this week: {order['item_count']} items "
+                      f"in the cart - nothing to add (--force to rebuild)")
+                if not dry_run:
+                    log_eval(STAGE, f"{week}:already-ordered", True)
+                return order
+            # A previous run part-completed (expired session, flaky selector).
+            # Top up only what is missing; the rest is already in the cart.
+            print(f"      resuming this week's cart: {len(pending)} of {len(items)} "
+                  f"not yet added")
+            items = pending
+        else:
+            # A links-only row means nothing was ever added to a real cart, so
+            # retrying the browser cannot duplicate anything.
+            print("      previous run produced links only - retrying the browser cart")
+    elif order and force:
+        print("      --force: re-adding every item (may duplicate cart contents)")
 
     if dry_run:
         for item in items:
-            print(f"      would add {item['ingredient_name']}: {search_url(item['ingredient_name'])}")
-        return _fallback_links(items)
-
-    existing = db.select("instacart_orders", "*", week_start_date=week)
-    if existing and not force:
-        row = existing[0]
-        print(
-            f"      already complete: method={row['method']}, "
-            f"items={row['item_count']} (use --force to rebuild)"
-        )
-        return row
+            print(f"      would add {item['ingredient_name']}: "
+                  f"{search_url(item['ingredient_name'])}")
+        print("      dry run - no browser session, no writes")
+        return dict(_fallback_links(items), method="dry_run")
 
     if fallback_only:
         result = _fallback_links(items)

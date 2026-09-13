@@ -26,6 +26,7 @@ from stages.plan import (
     expiring_ingredients,
     expiry_urgency,
     pantry_overlap,
+    shared_fraction,
     usable_pantry,
 )
 
@@ -279,6 +280,50 @@ class Assignment(unittest.TestCase):
     def test_no_recipes_plans_nothing(self) -> None:
         assignments, unschedulable = assign([], [slot()], pantry(), now=NOW)
         self.assertEqual((assignments, unschedulable), ([], []))
+
+    def test_prefers_a_recipe_that_reuses_this_week_s_ingredients(self) -> None:
+        """Cost control: one bunch of coriander for two dinners, not two."""
+        first = recipe(rid="a", cuisine="italian",
+                       names=("spinach", "coriander", "ginger"))
+        shares = recipe(rid="shares", cuisine="thai",
+                        names=("coriander", "ginger", "noodle"))
+        alone = recipe(rid="alone", cuisine="mexican",
+                       names=("beef", "lime", "tortilla"))
+
+        assignments, _ = assign(
+            [first, shares, alone],
+            [slot("s1"), slot("s2", day_offset=1)],
+            pantry(spinach=1), now=NOW)
+
+        self.assertEqual([a["recipe"]["id"] for a in assignments], ["a", "shares"])
+
+    def test_shared_bonus_does_not_override_expiry_urgency(self) -> None:
+        """Rescuing food that expires today still outranks a cheaper shop.
+
+        The short window can only take a quick dish, so the slow urgent one
+        competes for the second slot against a recipe that shares two of its
+        three ingredients with the first meal.
+        """
+        donor = recipe(rid="a_donor", cuisine="italian", active=30,
+                       names=("coriander", "ginger", "noodle"))
+        sharer = recipe(rid="b_sharer", cuisine="thai", active=30,
+                        names=("coriander", "ginger", "chilli"))
+        urgent = recipe(rid="urgent", cuisine="mexican", active=100,
+                        names=("spinach", "beef", "lime", "tortilla"))
+
+        assignments, _ = assign(
+            [donor, sharer, urgent],
+            [slot("short", minutes=60), slot("long", day_offset=1, minutes=180)],
+            pantry(spinach=0), now=NOW)
+
+        self.assertEqual([a["recipe"]["id"] for a in assignments],
+                         ["a_donor", "urgent"])
+
+    def test_shared_fraction_counts_only_overlapping_names(self) -> None:
+        r = recipe(names=("garlic", "ginger", "chilli", "rice"))
+        self.assertEqual(shared_fraction(r, {"garlic", "ginger"}), 0.5)
+        self.assertEqual(shared_fraction(r, set()), 0.0)
+        self.assertEqual(shared_fraction(recipe(names=()), {"garlic"}), 0.0)
 
     def test_unschedulable_only_lists_genuinely_oversized(self) -> None:
         """Left over because the week filled up is not the same as too long."""

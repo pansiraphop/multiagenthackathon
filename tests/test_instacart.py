@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from contextlib import contextmanager
 from datetime import date, datetime
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import config
 from stages import instacart
@@ -29,8 +29,24 @@ def fake_session(page: FakePage):
     yield page
 
 
-def item(number: int, name: str) -> dict:
-    return {"id": f"item-{number}", "ingredient_name": name, "unit": "unit"}
+def item(number: int, name: str, status: str = "pending", unit: str = "unit") -> dict:
+    return {
+        "id": f"item-{number}",
+        "ingredient_name": name,
+        "unit": unit,
+        "resolution_status": status,
+    }
+
+
+def fake_select(shopping: list[dict], order: dict | None):
+    """Stand in for db.select across the three reads stage 5 makes."""
+    def select(table: str, columns: str = "*", **_eq):
+        if table == "shopping_list":
+            return shopping
+        if table == "instacart_orders":
+            return [order] if order else []
+        return []
+    return select
 
 
 class FallbackTests(unittest.TestCase):
@@ -155,70 +171,185 @@ class DeliveryWindowTests(unittest.TestCase):
         )
 
 
+class CartSelectionTests(unittest.TestCase):
+    def test_same_ingredient_in_two_units_is_one_product(self):
+        rows = [
+            item(1, "butter", unit="g"),
+            item(2, "butter", unit="tbsp"),
+            item(3, "onion"),
+        ]
+        products, unusable = instacart._cartable(rows)
+
+        self.assertEqual([p["ingredient_name"] for p in products], ["butter", "onion"])
+        self.assertEqual(unusable, [])
+
+    def test_blank_ingredient_name_is_refused_not_guessed(self):
+        rows = [item(1, "  "), {"id": "x"}, item(2, "onion")]
+        products, unusable = instacart._cartable(rows)
+
+        self.assertEqual([p["ingredient_name"] for p in products], ["onion"])
+        self.assertEqual(len(unusable), 2)
+
+
+class OncePerWeekTests(unittest.TestCase):
+    def _run(self, shopping, order, **kwargs):
+        external = MagicMock(return_value=(
+            {
+                "cart_url": "https://www.instacart.com/store/cart",
+                "links": [],
+                "added": [],
+                "failed": [],
+                "method": "browser_automation",
+            },
+            True,
+        ))
+        with (
+            patch.object(instacart.db, "select", side_effect=fake_select(shopping, order)),
+            patch.object(instacart.db, "delete_where"),
+            patch.object(instacart.db, "update_where"),
+            patch.object(instacart.db, "insert", return_value=[{
+                "method": "browser_automation",
+                "item_count": 0,
+                "unresolved_item_count": 0,
+            }]),
+            patch.object(instacart, "_delivery_window", return_value=(None, None)),
+            patch.object(instacart, "log_eval"),
+            patch.object(instacart, "call_external_api", external),
+        ):
+            result = instacart.run(date(2026, 9, 14), **kwargs)
+        return result, external
+
+    def test_completed_week_is_never_ordered_twice(self):
+        order = {"method": "browser_automation", "item_count": 2,
+                 "unresolved_item_count": 0}
+        shopping = [item(1, "tomato", "added_to_cart"),
+                    item(2, "garlic", "added_to_cart")]
+
+        result, external = self._run(shopping, order)
+
+        self.assertEqual(result, order)
+        external.assert_not_called()
+
+    def test_partial_week_resumes_only_the_missing_items(self):
+        order = {"method": "browser_automation", "item_count": 1,
+                 "unresolved_item_count": 1}
+        shopping = [item(1, "tomato", "added_to_cart"), item(2, "garlic")]
+
+        _result, external = self._run(shopping, order)
+
+        external.assert_called_once()
+        sent = external.call_args.args[1]
+        self.assertEqual([r["ingredient_name"] for r in sent], ["garlic"])
+
+    def test_links_only_week_retries_every_item(self):
+        order = {"method": "fallback_links", "item_count": 0,
+                 "unresolved_item_count": 2}
+        shopping = [item(1, "tomato", "fallback_link"),
+                    item(2, "garlic", "fallback_link")]
+
+        _result, external = self._run(shopping, order)
+
+        sent = external.call_args.args[1]
+        self.assertEqual([r["ingredient_name"] for r in sent], ["tomato", "garlic"])
+
+    def test_force_reorders_a_completed_week(self):
+        order = {"method": "browser_automation", "item_count": 2,
+                 "unresolved_item_count": 0}
+        shopping = [item(1, "tomato", "added_to_cart"),
+                    item(2, "garlic", "added_to_cart")]
+
+        _result, external = self._run(shopping, order, force=True)
+
+        sent = external.call_args.args[1]
+        self.assertEqual(len(sent), 2)
+
+    def test_dry_run_touches_nothing(self):
+        shopping = [item(1, "tomato")]
+        with (
+            patch.object(instacart.db, "select", side_effect=fake_select(shopping, None)),
+            patch.object(instacart.db, "insert") as insert,
+            patch.object(instacart.db, "delete_where") as delete,
+            patch.object(instacart.db, "update_where") as update,
+            patch.object(instacart, "call_external_api") as external,
+            patch.object(instacart, "log_eval"),
+        ):
+            result = instacart.run(date(2026, 9, 14), dry_run=True)
+
+        self.assertEqual(result["method"], "dry_run")
+        external.assert_not_called()
+        insert.assert_not_called()
+        delete.assert_not_called()
+        update.assert_not_called()
+
+
 class WriteTests(unittest.TestCase):
-    def test_write_marks_added_and_failed_shopping_rows(self):
-        result = {
-            "cart_url": "https://www.instacart.com/store/cart",
-            "added": [item(1, "tomato")],
-            "failed": [item(2, "garlic")],
-            "method": "browser_automation",
-        }
-        inserted = dict(
-            id="order-1",
-            method="browser_automation",
-            item_count=1,
-            unresolved_item_count=1,
-        )
+    def _write(self, result, shopping):
+        inserted = {"id": "order-1"}
         with (
             patch.object(instacart, "_delivery_window", return_value=(None, None)),
             patch.object(instacart, "log_eval"),
+            patch.object(instacart.db, "select", side_effect=fake_select(shopping, None)),
             patch.object(instacart.db, "delete_where"),
-            patch.object(instacart.db, "insert", return_value=[inserted]),
+            patch.object(instacart.db, "insert", return_value=[inserted]) as insert,
             patch.object(instacart.db, "update_where") as update,
         ):
-            written = instacart._write_order(date(2026, 9, 14), result)
+            instacart._write_order(date(2026, 9, 14), result)
+        return insert.call_args.args[1], update
 
-        self.assertEqual(written, inserted)
+    def test_marks_by_name_so_one_product_covers_both_unit_rows(self):
+        result = {
+            "cart_url": "https://www.instacart.com/store/cart",
+            "added": [item(1, "butter", unit="g")],
+            "failed": [],
+            "method": "browser_automation",
+        }
+        shopping = [item(1, "butter", "added_to_cart", unit="g"),
+                    item(2, "butter", "added_to_cart", unit="tbsp")]
+
+        row, update = self._write(result, shopping)
+
         self.assertEqual(
             update.call_args_list[0].args,
             ("shopping_list", {"resolution_status": "added_to_cart"}),
         )
         self.assertEqual(
             update.call_args_list[0].kwargs,
-            {
-                "week_start_date": "2026-09-14",
-                "ingredient_name": "tomato",
-                "unit": "unit",
-            },
+            {"week_start_date": "2026-09-14", "ingredient_name": "butter"},
         )
-        self.assertEqual(
-            update.call_args_list[1].args,
-            ("shopping_list", {"resolution_status": "failed"}),
-        )
+        self.assertEqual(row["item_count"], 2)
+        self.assertEqual(row["unresolved_item_count"], 0)
 
-    def test_existing_order_skips_external_side_effect(self):
-        existing = {
-            "id": "order-1",
+    def test_counts_come_from_the_week_not_from_this_run(self):
+        result = {
+            "cart_url": "https://www.instacart.com/store/cart",
+            "added": [item(9, "turmeric")],
+            "failed": [],
             "method": "browser_automation",
-            "item_count": 2,
-            "unresolved_item_count": 0,
         }
+        shopping = [item(i, f"ing{i}", "added_to_cart") for i in range(26)]
+        shopping.append(item(9, "turmeric", "added_to_cart"))
+        shopping.append(item(99, "worcestershire sauce"))
 
-        def select(table, *_args, **_kwargs):
-            if table == "shopping_list":
-                return [item(1, "tomato")]
-            if table == "instacart_orders":
-                return [existing]
-            return []
+        row, _update = self._write(result, shopping)
 
-        with (
-            patch.object(instacart.db, "select", side_effect=select),
-            patch.object(instacart, "call_external_api") as external,
-        ):
-            result = instacart.run(date(2026, 9, 14))
+        self.assertEqual(row["item_count"], 27)
+        self.assertEqual(row["unresolved_item_count"], 1)
 
-        self.assertEqual(result, existing)
-        external.assert_not_called()
+    def test_failed_topup_on_a_real_cart_is_reported_as_mixed(self):
+        result = {
+            "cart_url": "https://www.instacart.com/store/search/turmeric",
+            "added": [],
+            "failed": [item(9, "turmeric")],
+            "method": "fallback_links",
+        }
+        shopping = [item(1, "tomato", "added_to_cart"),
+                    item(9, "turmeric", "fallback_link")]
+
+        row, _update = self._write(result, shopping)
+
+        self.assertEqual(row["method"], "mixed")
+        self.assertEqual(row["cart_url"], "https://www.instacart.com/store/cart")
+        self.assertEqual(row["item_count"], 1)
 
 
 if __name__ == "__main__":
