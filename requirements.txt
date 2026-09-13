@@ -6,3 +6,6 @@ google-auth
 google-auth-oauthlib
 requests
 yt-dlp
+fastapi
+uvicorn
+openai-whisper

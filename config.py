@@ -8,6 +8,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # --- credentials -----------------------------------------------------------
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 # Publishable key is enough while RLS is disabled; service key overrides it.
@@ -27,6 +35,12 @@ INSTACART_API_KEY = os.environ.get("INSTACART_API_KEY", "")
 INSTACART_API_BASE = os.environ.get("INSTACART_API_BASE", "https://connect.instacart.com")
 
 APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8000")
+
+# Instagram webhook ingestion. Caption is always primary; local Whisper is
+# best-effort and may be switched off without disabling the webhook.
+META_VERIFY_TOKEN = os.environ.get("META_VERIFY_TOKEN", "")
+INGEST_TRANSCRIBE = _env_bool("INGEST_TRANSCRIBE", True)
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
 
 # --- time ------------------------------------------------------------------
 TIMEZONE = ZoneInfo(os.environ.get("TIMEZONE", "America/Los_Angeles"))

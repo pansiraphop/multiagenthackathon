@@ -125,6 +125,15 @@ built from it**, so don't regenerate those rows once the calendar has been writt
 ### 1 · `extract.py` — reel → structured recipe
 Reads a reel URL or pasted caption; writes `recipes` + `recipe_ingredients`.
 
+Instagram DMs enter through `webhook.py`. It acknowledges Meta immediately, then
+`lib/ingest.py` parses every `ig_reel` attachment in a background task. The attachment's
+`payload.title` is the primary caption. When `INGEST_TRANSCRIBE=true`, yt-dlp downloads
+the audio and local Whisper produces a best-effort transcript; download/transcription
+failure never discards a usable caption. Ingestion writes one deduplicated `recipes` row
+per `source_url` with `extraction_status = 'pending'`. Extraction consumes those rows,
+combining `raw_caption` and nullable `raw_transcript`, then marks each row `success` or
+`failed`. There is intentionally no users table or auth for the single-user demo.
+
 Ingestion is tiered: `yt-dlp` metadata gives the caption without auth (most recipe reels
 put the full ingredient list there), audio transcription as a fallback for thin captions,
 pasted text as the guaranteed path. Log which tier fired — *"captions worked on 5/6 reels"*
@@ -332,6 +341,8 @@ source of truth (see `DATABASE.md`). The shared layer is done and tested:
 | `lib/prompts.py` | Extraction, dish identification, reconstruction, and `score_reason` prompts |
 | `lib/evals.py` | `log_eval()`, `timed()` context manager, `eval_report()`, `format_report()` |
 | `lib/external.py` | `call_external_api()` — returns `(result, ok)`, never raises |
+| `lib/ingest.py` | Reel payload parsing, caption-first local Whisper fallback, deduplicated pending-recipe write |
+| `webhook.py` | FastAPI Meta verification + background Reel ingestion on port 8000 |
 
 Run `python -m lib.normalize` and `python -m lib.schemas` to execute their self-tests.
 
@@ -422,9 +433,16 @@ voice agent greets you by recipe name.
 ## Setup
 
 ```bash
+brew install ffmpeg      # macOS; required only for local Whisper transcription
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env     # Supabase, Anthropic, Google OAuth, Instacart, Browserbase
+cp .env.example .env     # fill Supabase, META_VERIFY_TOKEN, and other credentials
 # apply the schema in the Supabase SQL editor
 python seed/seed_pantry.py && python seed/seed_calendar.py
+uvicorn webhook:app --host 0.0.0.0 --port 8000
 python run_week.py --reels reels.txt
 ```
+
+For a caption-only demo, set `INGEST_TRANSCRIBE=false`; webhook ingestion remains
+functional. Local Whisper defaults to the `base` model via `WHISPER_MODEL`.
