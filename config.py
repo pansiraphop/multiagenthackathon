@@ -1,12 +1,23 @@
 """InstaCook configuration. Every tunable lives here — no magic numbers in stages."""
 
 import os
+import sys
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# The terminal narration IS the demo, and model-generated text (score_reason)
+# contains em-dashes and curly quotes. The Windows console defaults to cp1252
+# and renders those as replacement characters, so force UTF-8 on the way out.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
 
 
 def _env_bool(name: str, default: bool) -> bool:

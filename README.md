@@ -260,9 +260,11 @@ delivery window. Explicit `timeZone`, skip rows that already have an event id.
   narration is the demo; judges should follow the reasoning without reading code.
   Flags worth having: resume-from-stage, and a dry-run that skips calendar writes.
 - **`run_eval.py`** — see §7.
-- **`seed_pantry.py`** — 15–20 items, some expiring in 48 hours, some in weeks, staples
-  with no expiry. Must overlap with the test recipes or expiry urgency is always zero and
-  the planner has nothing to show.
+- **`seed_pantry.py`** — 29 items: some expiring within 48 hours, some in weeks, staples
+  with no expiry, and one already expired to prove expired stock is ignored rather than
+  treated as urgent. Names go through the normalizer on the way in; if the pantry says
+  `Tomatoes` and a recipe says `tomato`, nothing matches and the whole thing quietly
+  fails.
 - **`seed_calendar.py`** — a realistically busy week. **Ten minutes, and the headline
   feature is invisible without it:** on an empty calendar every window is free, so
   "InstaCook found the evenings you're actually free" demonstrates nothing. Include one
@@ -351,6 +353,10 @@ source of truth (see `DATABASE.md`). The shared layer is done and tested:
 | `lib/prompts.py` | Extraction, dish identification, reconstruction, and `score_reason` prompts |
 | `lib/evals.py` | `log_eval()`, `timed()` context manager, `eval_report()`, `format_report()` |
 | `lib/external.py` | `call_external_api()` — returns `(result, ok)`, never raises |
+| `lib/google_auth.py` | OAuth with one read+write scope; re-consents if a cached token is too narrow |
+
+Stages built: **1** (co-dev), **2** `availability.py`, **3** `plan.py`. Seeds:
+`seed_pantry.py`, `seed_calendar.py`. 117 unit tests across `tests/`.
 | `lib/ingest.py` | Reel payload parsing, caption-first local Whisper fallback, deduplicated pending-recipe write |
 | `webhook.py` | FastAPI Meta verification + background Reel ingestion on port 8000 |
 
@@ -363,7 +369,7 @@ python -m unittest discover -s tests -t .   # all unit suites, no network, <1s
 python -m lib.normalize                     # normalizer self-tests
 python -m lib.schemas                       # schema + validator self-tests
 python -m tests.test_pipeline               # LIVE integration, stages 1+2
-python -m tests.test_pipeline --keep        # ...and leave the rows for stage 3
+python -m tests.test_pipeline --keep        # ...and leave the rows for the planner
 ```
 
 The unit suites are stdlib `unittest`, deterministic, and hit nothing external — a

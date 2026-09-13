@@ -49,11 +49,32 @@ def select(table: str, columns: str = "*", **eq) -> list[dict]:
 
 
 def delete_where(table: str, **eq) -> None:
-    """Used by the delete-then-insert idempotency rule on derived tables."""
+    """Used by the delete-then-insert idempotency rule on derived tables.
+
+    Refuses to run without a filter. PostgREST rejects an unfiltered DELETE
+    anyway, but failing here names the real mistake: a no-filter call is
+    almost always a bug, not a request to empty the table. Use delete_all()
+    when you genuinely mean everything.
+    """
+    if not eq:
+        raise ValueError(
+            f"delete_where('{table}') called with no filters. Use "
+            f"delete_all('{table}') if you really mean to empty it."
+        )
     q = client().table(table).delete()
     for key, value in eq.items():
         q = q.eq(key, value)
     q.execute()
+
+
+# A uuid that cannot collide with a real row, used as a tautological filter so
+# PostgREST accepts the statement.
+_IMPOSSIBLE_ID = "00000000-0000-0000-0000-000000000000"
+
+
+def delete_all(table: str) -> None:
+    """Empty a table. Deliberately separate from delete_where()."""
+    client().table(table).delete().neq("id", _IMPOSSIBLE_ID).execute()
 
 
 # --- stage 1 write path ----------------------------------------------------
