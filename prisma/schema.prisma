@@ -1,0 +1,214 @@
+// InstaCook — database schema SOURCE OF TRUTH.
+//
+// Prisma is used ONLY to author the schema and to generate `sql/schema.sql`.
+// The application is Python and queries Supabase at runtime via `supabase-py`,
+// so there is no Prisma client and nothing in this file may rely on
+// client-side behaviour: every default below is a REAL Postgres column default.
+//
+// Table and column names are snake_case because Python reads/writes by literal
+// name. Prisma field names are written in snake_case too, so the generated DDL
+// mirrors this file 1:1 and there is no mapping layer to get wrong.
+
+// Prisma 6 requires a generator block in order to enable preview features.
+// We need `postgresqlExtensions` so that `npm run sql:generate` emits the
+// `CREATE EXTENSION IF NOT EXISTS "pgcrypto"` line for gen_random_uuid().
+// No JS/TS client is ever generated or used — `prisma generate` is never run.
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  // Supabase pooled connection (pgBouncer, port 6543) — used for normal work.
+  url        = env("DATABASE_URL")
+  // Supabase direct connection (port 5432) — required for `prisma db push`,
+  // because DDL cannot run through pgBouncer's transaction pooling.
+  directUrl  = env("DIRECT_URL")
+  extensions = [pgcrypto]
+}
+
+// ---------------------------------------------------------------------------
+// Stage 1 — extract.py
+// ---------------------------------------------------------------------------
+
+/// One Instagram reel turned into a recipe.
+model Recipe {
+  id     String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  source_url String
+
+  // Populated by extraction; a freshly-created row is `extraction_status =
+  // 'pending'` and therefore has none of these yet.
+  title            String?
+  cuisine          String?
+  est_time_minutes Int?
+  steps            Json?   @db.JsonB
+  raw_caption      String?
+
+  servings          Int    @default(2)
+  extraction_status String @default("pending")
+
+  created_at DateTime @default(now()) @db.Timestamptz
+  updated_at DateTime @default(now()) @db.Timestamptz
+
+  recipe_ingredients RecipeIngredient[]
+  meal_plan          MealPlan[]
+
+  @@map("recipes")
+}
+
+/// Ingredient line for a recipe. `quantity` is nullable on purpose:
+/// null means a qualitative amount (see README ground rule 3) — never invent a number.
+model RecipeIngredient {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  recipe_id String   @db.Uuid
+  name      String
+  quantity  Decimal? @db.Decimal(10, 2)
+  unit      String?
+  qualitative_note String?
+
+  created_at DateTime @default(now()) @db.Timestamptz
+
+  recipe Recipe @relation(fields: [recipe_id], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([recipe_id])
+  @@index([name])
+  @@map("recipe_ingredients")
+}
+
+// ---------------------------------------------------------------------------
+// Seed — seed_pantry.py
+// ---------------------------------------------------------------------------
+
+/// What is in the fridge. `expiry_date` is null for staples that never expire.
+model Pantry {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ingredient_name String
+  quantity        Decimal   @db.Decimal(10, 2)
+  unit            String
+  expiry_date     DateTime? @db.Date
+
+  created_at DateTime @default(now()) @db.Timestamptz
+  updated_at DateTime @default(now()) @db.Timestamptz
+
+  @@index([ingredient_name])
+  @@map("pantry")
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2 — availability.py
+// ---------------------------------------------------------------------------
+
+/// A free evening window found in Google Calendar. `week_start_date` is always
+/// the Monday of the target week (ground rule 8).
+model CookSlot {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  week_start_date  DateTime @db.Date
+  slot_start       DateTime @db.Timestamptz
+  slot_end         DateTime @db.Timestamptz
+  duration_minutes Int
+  suitability_score Float   @default(0)
+  assigned         Boolean  @default(false)
+
+  created_at DateTime @default(now()) @db.Timestamptz
+  updated_at DateTime @default(now()) @db.Timestamptz
+
+  meal_plan MealPlan[]
+
+  @@index([week_start_date, slot_start])
+  @@map("cook_slots")
+}
+
+// ---------------------------------------------------------------------------
+// Stage 3 — plan.py  /  Stage 6 — calendar_sync.py
+// ---------------------------------------------------------------------------
+
+/// One planned meal. `id` is the stable handle for the cook-session URL
+/// ({APP_BASE_URL}/cook/{id}) — do not regenerate these rows once the calendar
+/// has been written.
+model MealPlan {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  recipe_id       String    @db.Uuid
+  cook_slot_id    String?   @db.Uuid
+  week_start_date DateTime  @db.Date
+  planned_date    DateTime? @db.Date
+
+  planned_start_time DateTime @db.Timestamptz
+  planned_end_time   DateTime @db.Timestamptz
+
+  score             Float?
+  score_reason      String?
+  calendar_event_id String?
+  status            String  @default("planned")
+
+  created_at DateTime @default(now()) @db.Timestamptz
+  updated_at DateTime @default(now()) @db.Timestamptz
+
+  recipe    Recipe    @relation(fields: [recipe_id], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  cook_slot CookSlot? @relation(fields: [cook_slot_id], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@unique([week_start_date, recipe_id])
+  @@index([week_start_date])
+  @@map("meal_plan")
+}
+
+// ---------------------------------------------------------------------------
+// Stage 4 — shopping_list.py  /  Stage 5 — instacart.py
+// ---------------------------------------------------------------------------
+
+/// What is actually missing, grouped by normalized name + unit. Units are
+/// compared, never converted across dimensions (ground rule 4).
+model ShoppingList {
+  id                String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  week_start_date   DateTime @db.Date
+  ingredient_name   String
+  quantity_needed   Decimal @db.Decimal(10, 2)
+  unit              String
+  resolution_status String  @default("pending")
+
+  created_at DateTime @default(now()) @db.Timestamptz
+  updated_at DateTime @default(now()) @db.Timestamptz
+
+  @@unique([week_start_date, ingredient_name, unit])
+  @@index([week_start_date])
+  @@map("shopping_list")
+}
+
+/// The cart for a week. `method` records which Instacart tier fired.
+/// One order per week, hence the unique week_start_date.
+model InstacartOrder {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  week_start_date DateTime @unique @db.Date
+  cart_url        String
+  item_count      Int      @default(0)
+  method          String
+
+  delivery_window_start DateTime? @db.Timestamptz
+  delivery_window_end   DateTime? @db.Timestamptz
+  delivery_event_id     String?
+
+  created_at DateTime @default(now()) @db.Timestamptz
+  updated_at DateTime @default(now()) @db.Timestamptz
+
+  @@map("instacart_orders")
+}
+
+// ---------------------------------------------------------------------------
+// All stages — ground rule 5 (graded deliverable)
+// ---------------------------------------------------------------------------
+
+/// Append-only. Every stage writes here on success AND failure.
+model EvalLog {
+  id            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  stage         String
+  input_ref     String
+  success       Boolean
+  retry_count   Int     @default(0)
+  duration_ms   Int?
+  error_message String?
+
+  created_at DateTime @default(now()) @db.Timestamptz
+
+  @@index([stage, created_at])
+  @@map("eval_log")
+}
