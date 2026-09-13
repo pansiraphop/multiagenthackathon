@@ -66,8 +66,9 @@ How to act:
 - plan_week is for "sort out my week". It replaces everything, so ask first if
   a plan already exists.
 - plan_week, schedule_recipe, move_meal and remove_meal already sync Google
-  Calendar and rebuild the shopping list. Don't call sync_calendar or
-  build_shopping_list after them unless a tool result said that step failed.
+  Calendar, rebuild the shopping list, and top up the Instacart cart through
+  Browserbase. Don't call sync_calendar or build_shopping_list after them
+  unless a tool result said that step failed.
 - Don't ask permission for reversible things.
 - Plenty of messages aren't requests at all. Answer cooking questions, explain
   a step, suggest a substitution — you don't need a tool to be useful.
@@ -211,7 +212,7 @@ def get_week_plan() -> str:
 
 @beta_tool
 def plan_week(replace_existing: bool = False) -> str:
-    """Plan the week: find free evenings, fit recipes, then write Google Calendar.
+    """Plan the week, write Google Calendar, and top up Instacart via Browserbase.
 
     Args:
         replace_existing: Must be true to overwrite a plan that already exists.
@@ -257,7 +258,7 @@ def get_shopping_list() -> str:
 
 @beta_tool
 def build_shopping_list() -> str:
-    """Work out what to buy for the planned week and link it on Instacart."""
+    """Rebuild what to buy and top up the Instacart cart through Browserbase."""
     week_start = config.week_start()
     msg = _refresh_shopping(week_start).strip()
     if msg.lower().startswith("nothing to buy"):
@@ -422,7 +423,12 @@ def _push_calendar(week_start: date) -> str:
 
 
 def _refresh_shopping(week_start: date) -> str:
-    """Rebuild the shopping list and leave an Instacart link the app can open."""
+    """Rebuild the shopping list and top up Instacart via Browserbase.
+
+    New meal-plan ingredients become pending rows; anything already
+    `added_to_cart` is carried over so Browserbase only searches what is new.
+    Never places an order from this path — cart fill only.
+    """
     from stages import instacart
 
     try:
@@ -434,19 +440,42 @@ def _refresh_shopping(week_start: date) -> str:
         db.delete_where("instacart_orders", week_start_date=week)
         return " Nothing to buy — pantry covers it, or the plan is empty."
 
-    # Fast path for DMs: always write a cart_url so the app CTA works now.
-    # A full Browserbase fill is slow; run that separately / via CLI when needed.
-    # Never place an order from this path.
+    pending = [
+        r for r in rows
+        if r.get("resolution_status")
+        not in (config.CART_READY_STATUS, config.ORDERED_STATUS)
+    ]
+    already = len(rows) - len(pending)
+
     try:
+        # force=False: only add pending/new ingredients; skip what's already carted.
         order = instacart.run(
-            week_start=week_start, fallback_only=True, place_order_flag=False)
+            week_start=week_start, place_order_flag=False, force=False)
     except Exception as exc:
         return (f" Shopping list updated ({len(rows)} items) but Instacart "
-                f"link failed ({exc}).")
+                f"cart update failed ({exc}).")
 
-    url = (order or {}).get("cart_url") or "Instacart"
-    return (f" Shopping list updated ({len(rows)} items). "
-            f"Open them on Instacart from the app ({url}).")
+    if not order:
+        return (f" Shopping list updated ({len(rows)} items) but Instacart "
+                f"returned nothing.")
+
+    method = order.get("method") or ""
+    added = order.get("item_count") or 0
+    unresolved = order.get("unresolved_item_count") or 0
+    url = order.get("cart_url") or "Instacart"
+
+    if method in config.BROWSER_CART_METHODS:
+        extra = f" ({already} already in cart)" if already else ""
+        if unresolved:
+            return (f" Shopping list updated ({len(rows)} items). "
+                    f"Instacart cart now has {added} items{extra}; "
+                    f"{unresolved} still need a hand. Open: {url}")
+        return (f" Shopping list updated ({len(rows)} items). "
+                f"Instacart cart topped up via Browserbase "
+                f"({added} in cart{extra}). Open: {url}")
+
+    return (f" Shopping list updated ({len(rows)} items) but Browserbase "
+            f"couldn't add them — open Instacart from the app ({url}).")
 
 
 def _place(recipe: dict, slot: dict, week_start: date, reason: str) -> dict:
@@ -500,7 +529,7 @@ def get_free_windows() -> str:
 
 @beta_tool
 def schedule_recipe(recipe: str, day: str, time: str = "") -> str:
-    """Put one recipe on one day and write it to Google Calendar before returning.
+    """Put one recipe on one day, sync Calendar, and top up Instacart via Browserbase.
 
     Args:
         recipe: The dish, however the user said it — "the katsu", "katsu curry".

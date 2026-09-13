@@ -363,6 +363,30 @@ class DirectControl(unittest.TestCase):
         shop.assert_called_once()
         self.assertIn("shopping list updated", out.lower())
 
+    def test_refresh_shopping_tops_up_instacart_via_browserbase(self) -> None:
+        """New meal ingredients must hit the real cart, not fallback links only."""
+        rows = [
+            {"ingredient_name": "rigatoni", "resolution_status": "pending"},
+            {"ingredient_name": "butter", "resolution_status": "added_to_cart"},
+        ]
+        order = {
+            "method": "browser_automation",
+            "item_count": 2,
+            "unresolved_item_count": 0,
+            "cart_url": "https://www.instacart.com/store/ralphs/storefront",
+        }
+        with patch("stages.shopping_list.run", return_value=rows) as shop, \
+             patch("stages.instacart.run", return_value=order) as cart:
+            out = concierge._refresh_shopping(config.week_start())
+        shop.assert_called_once()
+        cart.assert_called_once()
+        kwargs = cart.call_args.kwargs
+        self.assertFalse(kwargs.get("fallback_only", False))
+        self.assertFalse(kwargs.get("place_order_flag"))
+        self.assertFalse(kwargs.get("force"))
+        self.assertIn("Browserbase", out)
+        self.assertIn("storefront", out)
+
     def test_moving_something_not_planned_is_explained(self) -> None:
         with patch("lib.db.successful_recipes", return_value=[self.RECIPE]), \
              patch("lib.db.select", return_value=[]):

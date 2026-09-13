@@ -39,7 +39,7 @@ import config
 from lib import db, instagram
 from lib.evals import log_eval
 from lib.schemas import advance_prep, attended_minutes
-from stages import calendar_sync, plan, shopping_list
+from stages import calendar_sync, instacart, plan, shopping_list
 
 STAGE = "followup"
 
@@ -289,6 +289,8 @@ def _rebuild(week_start: date, *, use_llm: bool,
              exclude_slots: tuple[str, ...] = ()) -> None:
     plan.run(week_start=week_start, use_llm=use_llm, exclude_slots=exclude_slots)
     shopping_list.run(week_start=week_start)
+    # Top up only new/pending ingredients; never place an order from follow-up.
+    instacart.run(week_start=week_start, place_order_flag=False, force=False)
 
 
 def _swap_meal(week_start: date, option: dict) -> str:
@@ -318,6 +320,7 @@ def _swap_meal(week_start: date, option: dict) -> str:
         "status": "planned",
     })
     shopping_list.run(week_start=week_start)
+    instacart.run(week_start=week_start, place_order_flag=False, force=False)
     return f"swapped in {recipe['title']} for {start.astimezone(config.TIMEZONE):%A}"
 
 

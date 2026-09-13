@@ -406,6 +406,7 @@ class ApplyingAnAnswer(unittest.TestCase):
             "update": MagicMock(),
             "plan_run": MagicMock(),
             "shopping_run": MagicMock(),
+            "instacart_run": MagicMock(),
             "calendar_run": MagicMock(),
             "send": MagicMock(),
         }
@@ -416,6 +417,7 @@ class ApplyingAnAnswer(unittest.TestCase):
                          return_value=target_recipe),
             patch.object(followup.plan, "run", harness["plan_run"]),
             patch.object(followup.shopping_list, "run", harness["shopping_run"]),
+            patch.object(followup.instacart, "run", harness["instacart_run"]),
             patch.object(followup.calendar_sync, "run", harness["calendar_run"]),
             patch.object(followup.instagram, "send_dm", harness["send"]),
             patch.object(followup, "run", MagicMock(return_value=None)) as recheck,
@@ -437,6 +439,8 @@ class ApplyingAnAnswer(unittest.TestCase):
         h["plan_run"].assert_called_once()
         self.assertEqual(h["plan_run"].call_args.kwargs["exclude_slots"], ("s1",))
         h["shopping_run"].assert_called_once()
+        h["instacart_run"].assert_called_once()
+        self.assertFalse(h["instacart_run"].call_args.kwargs.get("place_order_flag"))
         h["calendar_run"].assert_called_once()
 
     def test_swap_keeps_the_window_and_changes_the_dish(self):
@@ -452,6 +456,7 @@ class ApplyingAnAnswer(unittest.TestCase):
         self.assertEqual(meal_update.args[2]["planned_end_time"],
                          "2026-09-14T18:45:00-07:00")
         h["shopping_run"].assert_called_once()
+        h["instacart_run"].assert_called_once()
 
     def test_keep_changes_no_plan(self):
         options = [{"key": "1", "action": "keep", "label": "Cook it anyway"}]
@@ -459,6 +464,7 @@ class ApplyingAnAnswer(unittest.TestCase):
 
         h["plan_run"].assert_not_called()
         h["shopping_run"].assert_not_called()
+        h["instacart_run"].assert_not_called()
 
     def test_answer_is_recorded_against_the_question(self):
         options = [{"key": "1", "action": "keep", "label": "Cook it anyway"}]
