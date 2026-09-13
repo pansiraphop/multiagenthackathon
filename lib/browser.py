@@ -33,6 +33,7 @@ def session() -> Iterator[Page]:
     bb = Browserbase(api_key=config.BROWSERBASE_API_KEY)
     remote = bb.sessions.create(
         project_id=config.BROWSERBASE_PROJECT_ID,
+        api_timeout=config.BROWSER_SESSION_TIMEOUT_SECONDS,
         browser_settings={
             "context": {
                 "id": config.BROWSERBASE_CONTEXT_ID,
@@ -50,7 +51,11 @@ def session() -> Iterator[Page]:
             page.set_default_navigation_timeout(config.BROWSER_NAV_TIMEOUT_MS)
             yield page
         finally:
-            browser.close()
+            try:
+                browser.close()
+            except Exception:
+                # A remote timeout may already have closed the CDP connection.
+                pass
 
 
 def dismiss_overlays(page: Page) -> None:

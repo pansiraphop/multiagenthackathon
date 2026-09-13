@@ -27,6 +27,11 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    return int(value) if value else default
+
+
 # --- credentials -----------------------------------------------------------
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 # Publishable key is enough while RLS is disabled; service key overrides it.
@@ -89,6 +94,9 @@ DELIVERY_BUFFER_HRS = 2       # margin between delivery end and first cook slot
 BROWSER_SELECTOR_TIMEOUT_MS = 8000
 BROWSER_NAV_TIMEOUT_MS = 20000
 BROWSER_ITEM_RETRIES = 1
+BROWSER_SESSION_TIMEOUT_SECONDS = _env_int(
+    "BROWSERBASE_SESSION_TIMEOUT_SECONDS", 1800
+)
 FAILURE_SHOT_DIR = "failures"
 
 # --- normalization vocabulary ----------------------------------------------

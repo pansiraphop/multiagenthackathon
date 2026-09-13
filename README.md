@@ -265,8 +265,11 @@ zero-dependency floor. The floor matters: stage 6 always needs *some* URL to emb
 
 Browser automation is isolated per item. Every selector wait has a timeout, a transient
 failure is retried once, and a final failure saves a screenshot under `failures/`, logs
-the ingredient, and continues. A browser-session or expired-login failure falls back to
-links for the whole list instead of dead-ending the pipeline. Run
+the ingredient, and continues. Sessions explicitly allow 30 minutes so a 28-item batch
+doesn't hit Browserbase's five-minute project default; if a session still expires,
+already-added items remain successful instead of being relabeled as fallback failures.
+A browser-session or expired-login failure falls back to links for the whole list instead
+of dead-ending the pipeline. Run
 `python scripts/instacart_probe.py tomato` once to log in through Browserbase's live view,
 confirm the live selectors, and persist the resulting `BROWSERBASE_CONTEXT_ID`.
 

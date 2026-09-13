@@ -129,8 +129,17 @@ def _browser_cart(items: list[dict]) -> dict:
                 print(f"      [skip] {item['ingredient_name']}: {error}")
 
         if added:
-            page.goto(f"{INSTACART_HOME}/store/cart", wait_until="domcontentloaded")
-            cart_url = page.url
+            try:
+                page.goto(
+                    f"{INSTACART_HOME}/store/cart",
+                    wait_until="domcontentloaded",
+                )
+                cart_url = page.url
+            except Exception as exc:
+                # Items already added remain in the persistent cart even if the
+                # remote session closes before the final navigation.
+                print(f"      [warn] cart navigation failed: {exc}")
+                cart_url = f"{INSTACART_HOME}/store/cart"
         else:
             cart_url = None
 
@@ -199,7 +208,27 @@ def _write_order(week_start: date, result: dict) -> dict:
         "delivery_window_end": end.isoformat() if end else None,
     }
     db.delete_where("instacart_orders", week_start_date=week_start.isoformat())
-    return db.insert("instacart_orders", row)[0]
+    written = db.insert("instacart_orders", row)[0]
+
+    def mark(item: dict, status: str) -> None:
+        # Stage 4 is delete-then-insert and may rerun while a long browser
+        # session is active, replacing UUIDs. Update through its stable key.
+        db.update_where(
+            "shopping_list",
+            {"resolution_status": status},
+            week_start_date=week_start.isoformat(),
+            ingredient_name=item["ingredient_name"],
+            unit=item["unit"],
+        )
+
+    for item in result["added"]:
+        mark(item, "added_to_cart")
+    failed_status = (
+        "fallback_link" if result["method"] == "fallback_links" else "failed"
+    )
+    for item in result["failed"]:
+        mark(item, failed_status)
+    return written
 
 
 def run(
@@ -208,6 +237,7 @@ def run(
     dry_run: bool = False,
     fallback_only: bool = False,
     limit: int | None = None,
+    force: bool = False,
 ) -> dict | None:
     week_start = week_start or config.week_start()
     week = week_start.isoformat()
@@ -225,6 +255,15 @@ def run(
         for item in items:
             print(f"      would add {item['ingredient_name']}: {search_url(item['ingredient_name'])}")
         return _fallback_links(items)
+
+    existing = db.select("instacart_orders", "*", week_start_date=week)
+    if existing and not force:
+        row = existing[0]
+        print(
+            f"      already complete: method={row['method']}, "
+            f"items={row['item_count']} (use --force to rebuild)"
+        )
+        return row
 
     if fallback_only:
         result = _fallback_links(items)
@@ -259,12 +298,18 @@ def main() -> None:
         help="skip Browserbase and write search links",
     )
     parser.add_argument("--limit", type=int, help="only process the first N items")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="rebuild even if this week already has an order (may duplicate cart items)",
+    )
     args = parser.parse_args()
     run(
         date.fromisoformat(args.week) if args.week else None,
         dry_run=args.dry_run,
         fallback_only=args.fallback_only,
         limit=args.limit,
+        force=args.force,
     )
 
 

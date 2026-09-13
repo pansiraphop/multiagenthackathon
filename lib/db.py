@@ -40,6 +40,16 @@ def update(table: str, row_id: str, values: dict) -> list[dict]:
     return client().table(table).update(values).eq("id", row_id).execute().data or []
 
 
+def update_where(table: str, values: dict, **eq) -> list[dict]:
+    """Update rows matching stable equality filters."""
+    if not eq:
+        raise ValueError(f"update_where('{table}') requires at least one filter")
+    query = client().table(table).update(values)
+    for key, value in eq.items():
+        query = query.eq(key, value)
+    return query.execute().data or []
+
+
 def select(table: str, columns: str = "*", **eq) -> list[dict]:
     """select(columns) with equality filters: select('pantry', ingredient_name='tomato')."""
     q = client().table(table).select(columns)

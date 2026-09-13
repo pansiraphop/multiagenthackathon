@@ -61,6 +61,7 @@ def run(ingredient: str, wait_seconds: int | None = None) -> None:
     context_id = _context_id(bb)
     session = bb.sessions.create(
         project_id=config.BROWSERBASE_PROJECT_ID,
+        api_timeout=config.BROWSER_SESSION_TIMEOUT_SECONDS,
         browser_settings={"context": {"id": context_id, "persist": True}},
     )
     live = bb.sessions.debug(session.id)
