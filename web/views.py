@@ -45,11 +45,11 @@ def titlecase(value: str | None) -> str:
 
 
 def layout(title: str, body: str, *, current: str = "", bar: str = "") -> str:
-    nav = "".join(
-        f'<a href="{href}"{" aria-current=\'page\'" if href == current else ""}>'
-        f"{esc(label)}</a>"
-        for href, label in (("/", "This week"), ("/pantry", "Pantry"))
-    )
+    links = []
+    for href, label in (("/", "This week"), ("/pantry", "Pantry")):
+        current_attr = ' aria-current="page"' if href == current else ""
+        links.append(f'<a href="{href}"{current_attr}>{esc(label)}</a>')
+    nav = "".join(links)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -233,7 +233,7 @@ def cook_page(meal: dict, order: dict | None, voice: dict) -> str:
     </label></li>""")
 
     steps = "".join(
-        f'<li data-key="step:{esc(meal["id"])}:{n}">'
+        f'<li data-key="step:{esc(meal["id"])}:{n}" data-step-index="{n}">'
         f'<span class="step-text">{esc(step)}</span></li>'
         for n, step in enumerate(recipe.get("steps") or [])
     )
@@ -243,13 +243,26 @@ def cook_page(meal: dict, order: dict | None, voice: dict) -> str:
     reel = (f'<a href="{esc(recipe["source_url"])}" target="_blank" rel="noopener">'
             f'Watch the original reel</a>' if recipe.get("source_url") else "")
 
-    cook_panel = f"""<div class="panel">
+    cook_panel = f"""<div class="panel" id="guide-panel">
     <h3>Cook</h3>
     <div class="panel-rows">
       <div class="panel-row"><span>Scheduled</span><b>{start:%a} {start.day} {start:%b}, {start:%H:%M}</b></div>
       <div class="panel-row"><span>Time needed</span><b>{attended} min</b></div>
     </div>
-    <button class="btn" id="voice" aria-disabled="true" disabled>Guided cooking</button>
+    <button class="btn" type="button" id="voice" data-guide-start>Start guided cooking</button>
+    <div class="guide" id="guide" hidden>
+      <div class="guide-meta">
+        <span class="guide-count" id="guide-count">Step 1 of 1</span>
+        <span class="guide-label" id="guide-label"></span>
+      </div>
+      <p class="guide-text" id="guide-text"></p>
+      <div class="guide-status" id="guide-status" aria-live="polite"></div>
+      <audio id="guide-audio" preload="auto"></audio>
+      <div class="btn-row">
+        <button class="btn btn-ghost" type="button" id="guide-replay">Replay</button>
+        <button class="btn" type="button" id="guide-next">Next</button>
+      </div>
+    </div>
   </div>"""
 
     body = f"""
@@ -294,9 +307,8 @@ def cook_page(meal: dict, order: dict | None, voice: dict) -> str:
 
     bar = f"""
 <div class="bar"><div class="inner">
-  <button class="btn" id="voice-mobile" aria-disabled="true" disabled>Guided cooking</button>
+  <button class="btn" type="button" id="voice-mobile" data-guide-start>Start guided cooking</button>
   {secondary}
-
 </div></div>
 <script id="cook-context" type="application/json">{json.dumps(voice)}</script>"""
 

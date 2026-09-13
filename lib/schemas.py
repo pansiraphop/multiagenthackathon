@@ -6,6 +6,7 @@ schema-valid at the API level; everything here is the semantic layer on top.
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -97,6 +98,26 @@ class DishIdentification(BaseModel):
                     "Guessing from a generic food shot is not confidence."
     )
     reasoning: str = Field(description="One sentence on what the signal was.")
+
+
+class VoiceoverSegment(BaseModel):
+    """One spoken beat. Segments exist so the script can be cut, not so it
+    can be styled — the listener never hears the label."""
+
+    label: str = Field(
+        description="Two or three words naming the beat, for the script file "
+                    "only: 'opening', 'monday', 'delivery', 'close'."
+    )
+    text: str = Field(
+        description="What the voice actually says. Plain spoken English: no "
+                    "markdown, no headings, no bullet characters, no emoji, no "
+                    "stage directions in brackets."
+    )
+
+
+class VoiceoverScript(BaseModel):
+    title: str = Field(description="A filename-friendly title. Never spoken.")
+    segments: list[VoiceoverSegment]
 
 
 class MealReasons(BaseModel):
@@ -193,6 +214,91 @@ def validate_recipe(r: ExtractedRecipe) -> list[str]:
                 f"{ing.name}: has a qualitative_note but is_approximate is false; "
                 f"set it true so the amount is shown as an estimate"
             )
+
+    return problems
+
+
+# Characters that are silent on the page and wrong in the ear: a voice model
+# reads "**" and "#" as noise or pauses, and "1." becomes "one dot".
+_UNSPEAKABLE = re.compile(r"[*#_|<>\[\]`•]|\be\.g\.|\betc\.")
+
+_TITLE_FILLER = {
+    "the", "a", "an", "and", "with", "for", "from", "your", "this", "that",
+    "easy", "quick", "best", "simple", "viral", "minute", "weeknight", "style",
+}
+
+
+def spoken_text(script: VoiceoverScript) -> str:
+    """The script as the voice will receive it: segments, blank line between."""
+    return "\n\n".join(s.text.strip() for s in script.segments if s.text.strip())
+
+
+def spoken_seconds(text: str) -> int:
+    """Rough runtime. Conservative on purpose — an over-long demo VO is a cut."""
+    words = len(text.split())
+    return int(round(words / config.SPOKEN_WORDS_PER_MINUTE * 60))
+
+
+def _content_words(text: str) -> list[str]:
+    return [w for w in re.findall(r"[a-z]+", text.lower())
+            if len(w) > 2 and w not in _TITLE_FILLER]
+
+
+def mentions(spoken: str, phrase: str) -> bool:
+    """Whether narration plausibly refers to `phrase`.
+
+    Half the distinctive words, not the exact string: a voice saying "the palak
+    paneer" is talking about "Weeknight Palak Paneer", and demanding the title
+    verbatim would force stilted narration or an endless retry loop.
+    """
+    wanted = _content_words(phrase)
+    if not wanted:
+        return True
+    said = set(_content_words(spoken))
+    hits = sum(1 for word in wanted if word in said)
+    return hits >= max(1, (len(wanted) + 1) // 2)
+
+
+def validate_voiceover(
+    script: VoiceoverScript,
+    *,
+    must_mention: tuple[str, ...] = (),
+    max_words: int,
+    min_words: int = 40,
+) -> list[str]:
+    """Semantic checks on narration. Empty list means it can be spoken as-is.
+
+    The mention check is the one that matters: a script that sounds great and
+    quietly drops Thursday's meal is the failure a listener won't catch.
+    """
+    problems: list[str] = []
+
+    if not script.segments:
+        problems.append("segments is empty")
+    for segment in script.segments:
+        if not segment.text.strip():
+            problems.append(f"segment '{segment.label}' has no text")
+
+    text = spoken_text(script)
+    words = len(text.split())
+    if words < min_words:
+        problems.append(f"the script is {words} words, too short to be worth "
+                        f"speaking; write at least {min_words}")
+    if words > max_words:
+        problems.append(f"the script is {words} words and must be under "
+                        f"{max_words}; cut detail, do not speed it up")
+
+    bad = sorted(set(_UNSPEAKABLE.findall(text)))
+    if bad:
+        problems.append(
+            f"contains characters a voice cannot read aloud ({', '.join(bad)}); "
+            f"write plain spoken English"
+        )
+
+    for phrase in must_mention:
+        if not mentions(text, phrase):
+            problems.append(f"never mentions '{phrase}', which the narration "
+                            f"is supposed to cover")
 
     return problems
 

@@ -16,5 +16,8 @@ __pycache__/
 venv/
 failures/
 
+# Generated voiceover scripts and MP3s (stage 7)
+out/
+
 # Node (Prisma schema tooling only)
 node_modules/

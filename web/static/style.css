@@ -303,7 +303,48 @@ a:hover { text-decoration-color: currentColor; }
   background: var(--accent); border-color: var(--accent); color: #fff;
 }
 .steps li[data-done="1"] .step-text { color: var(--ink-3); }
+.steps li[data-current="1"] {
+  background: var(--accent-bg);
+  margin-inline: -10px;
+  padding-inline: 10px;
+  border-radius: var(--r);
+  border-bottom-color: transparent;
+}
+.steps li[data-current="1"]::before {
+  background: var(--ink); border-color: var(--ink); color: #fff;
+}
 .step-text { flex: 1; min-width: 0; font-size: 0.9375rem; }
+
+/* --- guided cooking ------------------------------------------------------ */
+
+.guide {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 10px;
+}
+.guide[hidden] { display: none; }
+.guide-meta {
+  display: flex; justify-content: space-between; gap: 10px;
+  font-size: 0.75rem; color: var(--ink-3);
+  text-transform: capitalize;
+}
+.guide-count { font-weight: 600; color: var(--ink-2); text-transform: none; }
+.guide-text {
+  margin: 0;
+  font: 500 0.9375rem/1.45 var(--ui);
+  color: var(--ink);
+  letter-spacing: -0.01em;
+}
+.guide-status {
+  min-height: 1.2em;
+  font-size: 0.75rem;
+  color: var(--ink-3);
+}
+#guide-audio { display: none; }
+.btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.btn-row .btn { width: 100%; }
 
 /* --- recipe header ------------------------------------------------------- */
 
@@ -344,7 +385,6 @@ input:focus-visible, select:focus-visible {
   background: var(--sunken); color: var(--ink-3);
   border-color: var(--line); cursor: not-allowed;
 }
-.btn-row { display: grid; gap: 9px; }
 
 .link-remove {
   border: 0; background: none; padding: 8px 0 8px 12px;

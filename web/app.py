@@ -8,6 +8,11 @@ Three pages, server-rendered, no build step and no new dependencies:
     /cook/{meal_plan_id}  the recipe page (what the calendar links to)
     /pantry               what's in the fridge
 
+Plus the guided-cooking API the cook page uses:
+
+    GET /cook/{id}/guidance   segment list (text + audio URLs)
+    GET /cook/{id}/audio/{n}  ElevenLabs MP3 for one segment (lazy, cached)
+
 Why server-rendered: the data already lives in Supabase and `lib.db` already
 reads it, so a client-side app would mean shipping keys to the browser and
 re-implementing the same queries in JavaScript for no benefit. This keeps the
@@ -16,24 +21,24 @@ Supabase key server-side and the page fast on a phone on a kitchen wifi.
 `APP_BASE_URL` must point at wherever this is deployed BEFORE stage 6 runs —
 the cook URL is baked into each calendar description at write time.
 
-The guided-voice button is deliberately present and disabled. The page already
-carries the recipe context the agent will need (see `voice_payload`), so
-wiring ElevenLabs in later is one function, not a redesign.
+Guided cooking is step-by-step: Start plays the opening, Next advances and
+plays the next ElevenLabs segment. Hands stay free except for one thumb tap.
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, Form, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 import config
 from lib import db
 from lib.normalize import normalize_ingredient
 from stages.plan import usable_pantry
+from stages.voiceover import cook_guidance, ensure_segment_audio
 from web import views
 
 STATIC = Path(__file__).parent / "static"
@@ -57,7 +62,6 @@ def _week_meals(week_start: date | None = None) -> list[dict]:
     return [m for m in meals if m["recipe"]]
 
 
-
 def _week_order(week_start: date | None = None) -> dict | None:
     """The week's Instacart order.
 
@@ -71,11 +75,9 @@ def _week_order(week_start: date | None = None) -> dict | None:
 
 
 def voice_payload(meal: dict) -> dict:
-    """Everything the guided-cooking agent will need, assembled now.
-
-    Stage 7's voice half isn't built yet. Shipping the context with the page
-    means turning it on is a matter of handing this to the agent, rather than
-    reshaping the page around it later.
+    """Context the cook page ships so guided cooking can start without a second
+    round-trip for recipe facts. Segment audio is fetched lazily via
+    /cook/{id}/guidance and /cook/{id}/audio/{n}.
     """
     recipe = meal["recipe"]
     return {
@@ -88,6 +90,7 @@ def voice_payload(meal: dict) -> dict:
              "unit": i.get("unit"), "approximate": i.get("is_approximate")}
             for i in recipe.get("ingredients", [])
         ],
+        "guidance_url": f"/cook/{meal['id']}/guidance",
     }
 
 
@@ -134,6 +137,32 @@ def cook(meal_id: str) -> str:
         meal=meal,
         order=_week_order(week),
         voice=voice_payload(meal),
+    )
+
+
+@app.get("/cook/{meal_id}/guidance")
+def guidance(meal_id: str) -> JSONResponse:
+    """Segment list for the Next-button cook-along. Text only; audio is lazy."""
+    payload = cook_guidance(meal_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="No guidance for this meal")
+    return JSONResponse(payload)
+
+
+@app.get("/cook/{meal_id}/audio/{index}")
+def guidance_audio(meal_id: str, index: int):
+    """One spoken segment. Synthesizes on first request, then serves the cache."""
+    path = ensure_segment_audio(meal_id, index)
+    if not path or not path.exists():
+        raise HTTPException(
+            status_code=503,
+            detail="Speech unavailable — check ELEVENLABS_API_KEY",
+        )
+    return FileResponse(
+        path,
+        media_type="audio/mpeg",
+        filename=path.name,
+        headers={"Cache-Control": "public, max-age=86400"},
     )
 
 

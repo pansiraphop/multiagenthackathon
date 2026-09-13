@@ -161,6 +161,76 @@ Give real quantities for anything measurable. Do not add commentary, sourcing
 notes, or alternatives — the output is parsed by another program.
 """
 
+VOICEOVER_SYSTEM = (
+    "You write narration that will be spoken aloud by a text-to-speech voice, "
+    "never read on a page. You write only what the brief supports: the brief is "
+    "a record of decisions a system actually made, and a detail you add is a "
+    "claim about someone's real calendar that is not true."
+)
+
+WEEK_VOICEOVER_PROMPT = """\
+Write the spoken voiceover for a short demo of InstaCook, a system that turns
+saved recipe reels into a cooked week. It read the user's real calendar, found
+the evenings they were free, fitted recipes into those gaps, and ordered the
+groceries to land before the first one.
+
+The brief below is everything the system decided. Narrate those decisions.
+
+## What makes this good
+- **Lead with the reasoning, not the feature.** "Spinach on Monday, because it
+  expires first" is the whole point. "InstaCook uses advanced scheduling" is
+  filler.
+- Name each meal and the evening it landed on, and say why when the brief
+  gives a reason.
+- If the brief says a day was skipped or a recipe didn't fit, say so plainly.
+  A system that admits what it couldn't do sounds more trustworthy than one
+  that doesn't, and it is the most memorable line available to you.
+- Close on the delivery landing before the first cook, if the brief has it.
+
+## How it must be written
+- Around {target_words} words, and under {max_words}. It is read aloud at
+  conversational pace over a two-minute demo — going long is the one failure
+  that cannot be fixed in the edit.
+- Plain spoken English. No markdown, no headings, no bullets, no emoji, no
+  bracketed stage directions, no "e.g.".
+- Write numbers and times the way they are said: "seven fifteen on Tuesday",
+  "forty minutes", not "7:15pm" or "40 min".
+- Short sentences. A voice model runs out of breath in a long one, and a
+  listener runs out of attention first.
+- Break it into segments of one idea each, so it can be re-cut without
+  re-recording the whole thing. Labels are for the script file only and are
+  never spoken.
+- Never invent a dish, a day, an ingredient or a number that is not below.
+
+BRIEF:
+{brief}
+"""
+
+COOK_VOICEOVER_PROMPT = """\
+Write a spoken cook-along for one meal. The cook opens this from their calendar
+invite when they start cooking, and listens with their hands full — they cannot
+look at a screen and they cannot scroll back.
+
+## How it must be written
+- Open by naming the dish and how long it takes. One sentence.
+- Read the ingredients out as a short list, each with its amount, in the order
+  they are used. Say approximate amounts as approximate: "about two
+  tablespoons of olive oil".
+- Then walk the steps, one at a time, in order, exactly as given. Do not merge
+  two steps into one sentence and do not add a step of your own.
+- Between steps, say what the cook should be looking for, but only if the step
+  itself implies it. Do not invent techniques, temperatures or timings.
+- Where a step has a wait in it, say so clearly so they know they have a gap.
+- Close with one short line: the dish is done, and to enjoy it.
+- Plain spoken English, under {max_words} words. No markdown, no bullets, no
+  numbers written as digits where a word is natural, no emoji.
+- One segment per step, plus the opening and the close, so playback can be
+  paused between them.
+
+MEAL:
+{brief}
+"""
+
 SCORE_REASON_PROMPT = """\
 For each planned meal below, write one sentence explaining why it was scheduled
 then — for the cook to read in their calendar invite.

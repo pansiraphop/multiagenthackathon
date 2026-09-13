@@ -11,8 +11,7 @@ already in it.
 Built for the **Multi-App AI Agent Hackathon** (Sunday, September 13, 2026).
 Build closes 4:00 PM PT.
 
-**Apps it acts across:** Instagram · Google Calendar (read + write) · Instacart
-*(ElevenLabs voice guidance is scaffolded in the web app — see §6)*
+**Apps it acts across:** Instagram · Google Calendar (read + write) · Instacart · ElevenLabs
 
 This README is the shared spec. It sets direction and fixes the contracts between stages;
 implementation details get filled in as we build. If you change a contract, change it
@@ -429,18 +428,22 @@ delivery window. Explicit `timeZone`, skip rows that already have an event id.
 
 ---
 
-## 6. Stage 7 — the web app
+## 6. Stage 7 — the web app + ElevenLabs voice
 
-`web/` is the site the calendar invite links to. Three pages, server-rendered:
+`web/` is the site the calendar invite links to. Three pages, server-rendered, plus the
+guided-cooking API that plays ElevenLabs audio one beat at a time:
 
 | Route | What it is |
 |---|---|
 | `/` | This week's meals, and the single collated shopping list |
 | `/cook/{meal_plan_id}` | **What the calendar links to.** A recipe page you can cook from |
 | `/pantry` | What's in the fridge, grouped by how soon it goes off |
+| `GET /cook/{id}/guidance` | Voiceover segments for the Next-button cook-along |
+| `GET /cook/{id}/audio/{n}` | One ElevenLabs MP3 (lazy; cached under `out/voiceover/`) |
 
 ```bash
-uvicorn web.app:app --reload --port 8000
+# webhook owns port 8000; run the cook UI on another port for local demos
+uvicorn web.app:app --reload --port 8001
 ```
 
 ### Why it's server-rendered Python and not a JS app
@@ -454,9 +457,9 @@ It also avoids writing the data layer twice. `render_amount()`, `attended_minute
 in them. Reimplementing those rules in TypeScript is how a `~2 tbsp (a good glug)` quietly
 becomes `2 tbsp`.
 
-No template engine, no build step, no new dependencies — FastAPI was already here for the
-webhook. `web/views.py` is plain functions returning strings, so the pages are testable
-without a browser.
+No template engine, no build step — FastAPI was already here for the webhook.
+`web/views.py` is plain functions returning strings, so the pages are testable without a
+browser. `python-multipart` is required only for the pantry form posts.
 
 ### Designed for a phone at a stove
 
@@ -466,18 +469,20 @@ a sticky action bar inside the iOS safe-area inset, and the **Wake Lock API** so
 screen doesn't die between steps. Estimates are marked `est.` — a guess must never read as
 a measurement.
 
-Warm paper ground, one clay accent, serif dish names against system-sans UI, hairline
-rules, full dark mode. Restraint is the point.
+### Guided cooking — wired
 
-### The voice half — ready, not wired
+**Start guided cooking** fetches `/cook/{id}/guidance`, plays the opening ElevenLabs beat,
+and **Next** advances one segment at a time (ingredients → each method step → close). The
+matching method row highlights; finishing a step marks it done. Replay re-speaks the
+current beat. Audio is synthesized lazily per segment and cached, so re-opening a meal
+does not re-spend credits.
 
-The guided-cooking button is on the page and honestly disabled. `window.InstaCook.context`
-already carries the recipe, steps and ingredients the agent needs, so switching it on is:
-read that JSON, hand it to a **hosted ElevenLabs conversational agent** as session context,
-drop the `disabled` attribute. Their agent ships as a plain web component, so no framework
-is needed.
+`stages/voiceover.py` also narrates the whole week as a standalone script/MP3
+(`python -m stages.voiceover`, or `run_week.py --voiceover`). Same ElevenLabs wrapper
+(`lib/voice.py`); week narration is opt-in and never blocks the pipeline.
 
-Do not hand-roll an STT→LLM→TTS loop. That's the difference between an afternoon and a day.
+A hosted conversational agent (interrupt / "repeat that" / substitutions) is still
+optional. The Next-button path covers the demo beat without it.
 
 ### The pantry, and where it's going
 
@@ -488,9 +493,9 @@ The manual form is the fallback and the way to watch the data model work before 
 ### One thing that will bite
 
 `APP_BASE_URL` is baked into each calendar description **at write time**. Point it at
-wherever the app is actually reachable (`ngrok http 8000` is enough) *before* running stage
-6, or the link in the invite will say `localhost` on your phone. Changing it afterwards
-means `calendar_sync --clear` and re-running.
+wherever the app is actually reachable (`ngrok http 8001` for the cook UI is enough)
+*before* running stage 6, or the link in the invite will say `localhost` on your phone.
+Changing it afterwards means `calendar_sync --clear` and re-running.
 
 ---
 
@@ -557,6 +562,7 @@ source of truth (see `DATABASE.md`). The shared layer is done and tested:
 | `lib/evals.py` | `log_eval()`, `timed()` context manager, `eval_report()`, `format_report()` |
 | `lib/external.py` | `call_external_api()` — returns `(result, ok)`, never raises |
 | `lib/google_auth.py` | OAuth with one read+write scope; re-consents if a cached token is too narrow |
+| `lib/voice.py` | ElevenLabs TTS: `synthesize()`, `resolve_voice()`, chunking under the char limit |
 | `web/views.py` | Page rendering as pure functions — testable without a browser |
 | `lib/ingest.py` | Reel payload parsing, caption-first local Whisper fallback, deduplicated pending-recipe write |
 | `lib/instagram.py` | Outbound DMs with quick replies, console fallback tier, reply parsing, `match_option()` |
@@ -567,8 +573,8 @@ source of truth (see `DATABASE.md`). The shared layer is done and tested:
 
 Stages built: **1** `stages/extract.py`, **2** `availability.py`, **3** `plan.py`,
 **4** `shopping_list.py`, **5** `instacart.py`, **5b** `followup.py`,
-**6** `calendar_sync.py`, **7** `web/`.
-`run_week.py` runs them in order. Seeds:
+**6** `calendar_sync.py`, **7** `web/` + `voiceover.py`.
+`run_week.py` runs them in order (`--voiceover` for stage 7 narration). Seeds:
 `seed_pantry.py`, `seed_calendar.py`.
 
 Run `python -m lib.normalize`, `python -m lib.schemas`, and `python -m lib.source` for
@@ -622,8 +628,8 @@ test captions and ground-truth labels · `run_eval.py`.
 `availability.py` · `plan.py` · `instacart.py` · `calendar_sync.py` · calendar seed ·
 `run_week.py`.
 
-**Stage 7:** `voiceover.py` is built and touches nothing else. The conversational cook
-session is still open — whoever is free first.
+**Stage 7:** `web/` cook page with Next-button ElevenLabs guidance, plus
+`stages/voiceover.py` for week narration. Conversational agent still optional.
 
 The schema and the normalizer are **already settled and built** (see above) — everything
 downstream assumes them, so don't reimplement either. If you need a contract changed,
@@ -693,10 +699,9 @@ three options, you tap *"cook the vodka rigatoni that night instead"*, and the c
 rewrites itself while the video is still playing. Force it on camera by pushing
 `delivery_window_end` past the first cook slot and re-running stage 5b.
 
-The stage 7 voiceover gives the demo two possible closings. Narrate the 0:35–1:10 beat
-with the generated MP3 instead of a live voice — the system explaining its own reasoning
-is a stronger version of the same thirty seconds. Or end on the cook-along: tap the
-calendar link and hear it read the first step back to you.
+The stage 7 cook page is the closing beat: open the calendar link, tap **Start guided
+cooking**, and advance with **Next** while ElevenLabs reads each step. The week
+voiceover MP3 is the alternate — the system narrating its own scheduling decisions.
 
 ---
 
