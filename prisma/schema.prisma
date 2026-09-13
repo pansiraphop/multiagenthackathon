@@ -41,7 +41,17 @@ model Recipe {
   // 'pending'` and therefore has none of these yet.
   title            String?
   cuisine          String?
-  est_time_minutes Int?
+  // Three different times, and only one of them is what a calendar block needs.
+  //   est_time_minutes    active hands-on work
+  //   total_time_minutes  the whole span you must be at home (active +
+  //                       unattended cooking: braising, roasting, proving).
+  //                       THE PLANNER FITS ON THIS. Using active time puts a
+  //                       two-hour braise in a forty-minute gap.
+  //   advance_prep_minutes lead time before the session when you need not be
+  //                       present: marinating, chilling, soaking, overnight rise.
+  est_time_minutes     Int?
+  total_time_minutes   Int?
+  advance_prep_minutes Int  @default(0)
   steps            Json?   @db.JsonB
   raw_caption      String?
   raw_transcript   String?

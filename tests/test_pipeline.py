@@ -9,8 +9,8 @@ is never picked up by `unittest discover`. Run it deliberately:
 
 What it actually proves is the handoff. Each stage passing on its own doesn't
 mean the planner can do anything: extraction has to produce recipes whose
-est_time_minutes fit inside the windows availability found. That join is the
-contract, and it's what this checks.
+ATTENDED time (total_time_minutes, not active) fits inside the windows
+availability found. That join is the contract, and it's what this checks.
 """
 
 from __future__ import annotations
@@ -31,7 +31,13 @@ from lib.normalize import (
     to_ingredient_row,
 )
 from lib.prompts import EXTRACTION_PROMPT, EXTRACTION_SYSTEM
-from lib.schemas import ExtractedRecipe, needs_reconstruction, validate_recipe
+from lib.schemas import (
+    ExtractedRecipe,
+    advance_prep,
+    attended_minutes,
+    needs_reconstruction,
+    validate_recipe,
+)
 from stages import availability
 
 INPUT_REF = "integration-test"
@@ -50,6 +56,12 @@ Serves 2. 10 mins flat!""", "short"),
 1 tsp garam masala, 1/2 tsp turmeric, a good glug of ghee, 100ml cream.
 Blanch and blitz the spinach. Fry the paneer till golden. Bloom the spices,
 add the puree, finish with cream. 35 minutes, serves 4.""", "medium"),
+
+    ("""Korean fried chicken 🍗 marinate overnight, fry in 20 min
+1 lb chicken wings, 3 tbsp gochujang, 2 tbsp soy sauce, 1 tbsp honey,
+4 cloves garlic, 1 tbsp rice vinegar, 100g cornstarch, oil for frying.
+Marinate the wings overnight in gochujang, soy, honey and garlic.
+Next day dredge in cornstarch and fry 8 minutes a side. Serves 2.""", "marinade"),
 
     ("""SLOW BRAISED short rib ragu - worth every minute
 1.5 lbs beef short rib, 2 carrots, 2 celery sticks, 1 onion,
@@ -88,6 +100,8 @@ def run_stage_1() -> list[dict]:
             title=parsed.title,
             cuisine=parsed.cuisine,
             est_time_minutes=parsed.est_time_minutes,
+            total_time_minutes=parsed.total_time_minutes,
+            advance_prep_minutes=parsed.advance_prep_minutes,
             servings=parsed.servings,
             steps=parsed.steps,
             extraction_status="success",
@@ -103,8 +117,11 @@ def run_stage_1() -> list[dict]:
         db.insert_ingredients(recipe["id"], rows)
 
         approx = sum(1 for r in rows if r["is_approximate"])
-        print(f"      {parsed.title[:34]:34s} {parsed.est_time_minutes:>3} min  "
-              f"{len(rows)} ingredients ({approx} approximated)")
+        prep = (f"  +{parsed.advance_prep_minutes // 60}h ahead"
+                if parsed.advance_prep_minutes else "")
+        print(f"      {parsed.title[:32]:32s} active {parsed.est_time_minutes:>3} "
+              f"attended {parsed.total_time_minutes:>3}  "
+              f"{len(rows)} ingr ({approx} approx){prep}")
         written.append(recipe)
 
     if len(written) != len(CAPTIONS):
@@ -123,6 +140,12 @@ def check_stage_1_invariants() -> list[dict]:
         if not recipe["est_time_minutes"]:
             fail(f"{recipe['title']}: est_time_minutes is null - the planner's "
                  f"slot-fitting comparison would raise")
+        if not recipe.get("total_time_minutes"):
+            fail(f"{recipe['title']}: total_time_minutes is null - the planner "
+                 f"fits on attended time, so this must be set")
+        if recipe["total_time_minutes"] < recipe["est_time_minutes"]:
+            fail(f"{recipe['title']}: attended span is shorter than the active "
+                 f"work inside it")
         if not recipe["ingredients"]:
             fail(f"{recipe['title']}: no ingredient rows")
         if not recipe["steps"]:
@@ -159,13 +182,25 @@ def check_handoff(recipes: list[dict], slots: list[dict]) -> None:
     longest = durations[-1]
 
     fits_any = 0
-    for recipe in sorted(recipes, key=lambda r: r["est_time_minutes"]):
-        need = recipe["est_time_minutes"] + buffer
+    unschedulable: list[str] = []
+    for recipe in sorted(recipes, key=lambda r: attended_minutes(r)):
+        need = attended_minutes(recipe) + buffer
         usable = [d for d in durations if need <= d]
-        verdict = f"fits {len(usable)}/{len(durations)} windows" if usable else "fits NO window"
-        print(f"      {recipe['title'][:34]:34s} needs {need:>3} min  {verdict}")
+        verdict = (f"fits {len(usable)}/{len(durations)} windows" if usable
+                   else "fits NO window")
+        lead = advance_prep(recipe)
+        note = f"  (start {lead // 60}h ahead)" if lead else ""
+        print(f"      {recipe['title'][:32]:32s} needs {need:>3} min  {verdict}{note}")
         if usable:
             fits_any += 1
+        else:
+            unschedulable.append(recipe["title"])
+
+    # Not a failure - a long braise genuinely may not fit this week. But the
+    # planner has to report it rather than silently dropping the recipe.
+    if unschedulable:
+        print(f"      [note] {len(unschedulable)} recipe(s) exceed every window; "
+              f"the planner must surface these, not drop them silently")
 
     if fits_any == 0:
         fail(f"no recipe fits any window (longest is {longest} min) - the planner "
@@ -176,7 +211,7 @@ def check_handoff(recipes: list[dict], slots: list[dict]) -> None:
     narrow = [d for d in durations if d < 45]
     if narrow:
         excluded = [r["title"] for r in recipes
-                    if r["est_time_minutes"] + buffer > narrow[-1]]
+                    if attended_minutes(r) + buffer > narrow[-1]]
         if not excluded:
             print(f"      [warn] every recipe fits the {narrow[-1]}-min window; "
                   f"the fit constraint isn't being exercised")

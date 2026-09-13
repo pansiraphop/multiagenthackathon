@@ -53,7 +53,7 @@ to fake an upstream stage and get to work immediately.
 
 Reading the calendar is *upstream* of the planner, not downstream. The planner doesn't
 just rank recipes, it fits them: a 45-minute recipe can't go in a 25-minute gap. That
-makes `est_time_minutes` a hard constraint rather than a display field, and it's the most
+makes cooking time a hard constraint rather than a display field, and it's the most
 interesting thing the system does.
 
 ---
@@ -92,6 +92,14 @@ they're worth agreeing on up front.
    everywhere.
 9. **Nothing named `calendar.py`** — it shadows the stdlib module and breaks
    `google-api-python-client` imports. Use `calendar_sync.py`.
+10. **The planner fits on `total_time_minutes`, never `est_time_minutes`.** A recipe has
+    three different times and only one of them books an evening: active hands-on work,
+    the **attended** span you must be home for (active plus braising, roasting, proving),
+    and advance prep you need not be present for (marinating, chilling, rising). Fitting
+    on active time schedules a two-hour braise into a forty-minute gap. Use
+    `schemas.attended_minutes()`, which falls back to active time when total is missing —
+    under-booking a slot is safe, over-booking a braise is not. `advance_prep_minutes`
+    means the cook must start the day before, so it belongs in the calendar description.
 
 Two shared wrappers, both in `lib/`: one for LLM calls (retry + validate + log) and one
 for external API calls (try + log + return `None`). Write each once; don't end up with
@@ -106,7 +114,7 @@ stages depend on. Add whatever else you need.
 
 | Table | Key columns | Written by |
 |---|---|---|
-| `recipes` | `id`, `source_url`, `title`, `cuisine`, `est_time_minutes`, `servings`, `steps` (jsonb), `raw_caption`, `raw_transcript`, `extraction_status`, `provenance`, `source_sufficiency` | 1 |
+| `recipes` | `id`, `source_url`, `title`, `cuisine`, `est_time_minutes`, `total_time_minutes`, `advance_prep_minutes`, `servings`, `steps` (jsonb), `raw_caption`, `raw_transcript`, `extraction_status`, `provenance`, `source_sufficiency` | 1 |
 | `recipe_ingredients` | `recipe_id`, `name`, `quantity`, `unit`, `is_approximate`, `qualitative_note` | 1 |
 | `pantry` | `ingredient_name`, `quantity`, `unit`, `expiry_date` | seed |
 | `cook_slots` | `week_start_date`, `slot_start`, `slot_end`, `duration_minutes`, `suitability_score`, `assigned` | 2 |
@@ -201,8 +209,10 @@ Reads `recipes`, `pantry`, `cook_slots`; writes `meal_plan`.
 
 **Deterministic scoring and assignment — no LLM in the decision path.** Score each recipe
 on expiry urgency (weighted highest), pantry overlap, and how big a shop it implies. Then
-walk the slots chronologically and take the best-scoring recipe that actually fits,
-penalizing cuisines already used that week. Walking slots in time order means
+walk the slots chronologically and take the best-scoring recipe that actually fits —
+`attended_minutes(recipe) + SLOT_BUFFER_MINUTES <= slot.duration_minutes` — penalizing
+cuisines already used that week. A recipe that exceeds every window must be reported as
+unschedulable, not silently dropped. Walking slots in time order means
 soonest-expiring ingredients land on the earliest evenings for free.
 
 One LLM call per meal generates `score_reason` — a one-sentence human-readable "why this
@@ -362,7 +372,7 @@ excluded from discovery because it spends real API calls and writes real rows.
 
 What `test_pipeline` proves is the **handoff**, not the stages. Each stage passing alone
 doesn't mean the planner can do anything: extraction has to produce recipes whose
-`est_time_minutes` fit inside the windows availability found, and the narrow windows have
+**attended** time fits inside the windows availability found, and the narrow windows have
 to actually exclude something — otherwise the fit constraint isn't doing any work and the
 demo has no story. It asserts both, and it cleans up after itself.
 

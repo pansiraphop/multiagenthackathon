@@ -75,7 +75,9 @@ CUISINES = (
 MIN_INGREDIENTS_FOR_COMPLETE = 3
 MIN_STEPS_FOR_COMPLETE = 1
 EST_TIME_MIN = 5
-EST_TIME_MAX = 180
+EST_TIME_MAX = 180            # active hands-on work
+TOTAL_TIME_MAX = 600          # attended span: a 5-hour braise is real
+MAX_ADVANCE_PREP_MINUTES = 4320   # 3 days covers brining and long ferments
 
 
 def week_start(d: date | None = None) -> date:

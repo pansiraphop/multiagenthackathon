@@ -11,6 +11,8 @@ CREATE TABLE "recipes" (
     "title" TEXT,
     "cuisine" TEXT,
     "est_time_minutes" INTEGER,
+    "total_time_minutes" INTEGER,
+    "advance_prep_minutes" INTEGER NOT NULL DEFAULT 0,
     "steps" JSONB,
     "raw_caption" TEXT,
     "raw_transcript" TEXT,

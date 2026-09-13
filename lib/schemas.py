@@ -53,7 +53,22 @@ class ExtractedRecipe(BaseModel):
     title: str
     cuisine: Cuisine
     est_time_minutes: int = Field(
-        description="Active cooking time in minutes, excluding marinating or chilling."
+        description="ACTIVE hands-on minutes only: chopping, searing, stirring, "
+                    "plating. Not waiting time of any kind."
+    )
+    total_time_minutes: int = Field(
+        description="The whole span the cook must be AT HOME, from starting to "
+                    "eating. Active work plus unattended cooking they have to be "
+                    "around for: braising, roasting, baking, simmering, resting a "
+                    "roast. Equals est_time_minutes for a quick stir-fry; much "
+                    "larger for a two-hour braise. Must be >= est_time_minutes.",
+    )
+    advance_prep_minutes: int = Field(
+        default=0,
+        description="Lead time needed BEFORE that session, during which the cook "
+                    "need not be present: marinating, brining, chilling, soaking, "
+                    "overnight rising, freezing. 0 if none. An overnight marinade "
+                    "is roughly 720.",
     )
     servings: int
     steps: list[str] = Field(
@@ -102,8 +117,38 @@ def validate_recipe(r: ExtractedRecipe) -> list[str]:
     if not (config.EST_TIME_MIN <= r.est_time_minutes <= config.EST_TIME_MAX):
         problems.append(
             f"est_time_minutes is {r.est_time_minutes}, must be between "
-            f"{config.EST_TIME_MIN} and {config.EST_TIME_MAX}"
+            f"{config.EST_TIME_MIN} and {config.EST_TIME_MAX} (active work only)"
         )
+    if not (config.EST_TIME_MIN <= r.total_time_minutes <= config.TOTAL_TIME_MAX):
+        problems.append(
+            f"total_time_minutes is {r.total_time_minutes}, must be between "
+            f"{config.EST_TIME_MIN} and {config.TOTAL_TIME_MAX}"
+        )
+    if r.total_time_minutes < r.est_time_minutes:
+        problems.append(
+            f"total_time_minutes ({r.total_time_minutes}) is less than "
+            f"est_time_minutes ({r.est_time_minutes}); the attended span cannot "
+            f"be shorter than the hands-on work inside it"
+        )
+    if not (0 <= r.advance_prep_minutes <= config.MAX_ADVANCE_PREP_MINUTES):
+        problems.append(
+            f"advance_prep_minutes is {r.advance_prep_minutes}, must be between 0 "
+            f"and {config.MAX_ADVANCE_PREP_MINUTES}"
+        )
+    # Waiting that requires presence belongs in total_time_minutes; waiting that
+    # doesn't belongs in advance_prep_minutes. Putting a braise in the latter
+    # would let the planner book a 40-minute window for a 3-hour dish.
+    if r.advance_prep_minutes and r.total_time_minutes == r.est_time_minutes:
+        for step in r.steps:
+            low = step.lower()
+            if any(word in low for word in
+                   ("braise", "roast for", "bake for", "simmer for", "slow cook")):
+                problems.append(
+                    "a step describes unattended cooking that needs the cook at "
+                    "home, but total_time_minutes equals est_time_minutes; that "
+                    "time belongs in total_time_minutes, not advance_prep_minutes"
+                )
+                break
     if r.servings <= 0:
         problems.append(f"servings is {r.servings}, must be positive")
     if not r.steps:
@@ -152,6 +197,29 @@ def validate_recipe(r: ExtractedRecipe) -> list[str]:
     return problems
 
 
+def attended_minutes(recipe) -> int:
+    """How long the cook is committed for. What the planner must fit on.
+
+    Accepts an ExtractedRecipe or a recipes row. Falls back to active time when
+    total is missing, which is the only safe default: better to under-book a
+    slot than to silently schedule a three-hour braise into forty minutes.
+    """
+    if isinstance(recipe, dict):
+        total = recipe.get("total_time_minutes")
+        active = recipe.get("est_time_minutes")
+    else:
+        total = getattr(recipe, "total_time_minutes", None)
+        active = getattr(recipe, "est_time_minutes", None)
+    return int(total or active or 0)
+
+
+def advance_prep(recipe) -> int:
+    """Lead time needed before the cook session, in minutes. 0 for most dishes."""
+    if isinstance(recipe, dict):
+        return int(recipe.get("advance_prep_minutes") or 0)
+    return int(getattr(recipe, "advance_prep_minutes", 0) or 0)
+
+
 # --- the escalation gate ---------------------------------------------------
 
 def needs_reconstruction(r: ExtractedRecipe) -> bool:
@@ -170,7 +238,8 @@ def needs_reconstruction(r: ExtractedRecipe) -> bool:
 
 if __name__ == "__main__":
     good = ExtractedRecipe(
-        title="Palak Paneer", cuisine="indian", est_time_minutes=40, servings=4,
+        title="Palak Paneer", cuisine="indian", est_time_minutes=40,
+        total_time_minutes=40, advance_prep_minutes=0, servings=4,
         steps=["Blanch the spinach.", "Fry the paneer.", "Simmer together."],
         ingredients=[
             Ingredient(name="spinach", quantity=400, unit="g"),
@@ -219,6 +288,27 @@ if __name__ == "__main__":
         ]
     })
     assert any("listed twice" in p for p in validate_recipe(dupes))
+
+    # Timing: the attended span can't be shorter than the work inside it.
+    inverted = good.model_copy(update={"total_time_minutes": 20})
+    assert any("less than" in p for p in validate_recipe(inverted))
+
+    braise = good.model_copy(update={
+        "est_time_minutes": 30, "total_time_minutes": 150, "advance_prep_minutes": 0})
+    assert validate_recipe(braise) == [], "a long attended braise is valid"
+    assert attended_minutes(braise) == 150, "the planner must fit on the attended span"
+
+    # Unattended-but-present time misfiled as advance prep is the dangerous case.
+    misfiled = good.model_copy(update={
+        "est_time_minutes": 30, "total_time_minutes": 30,
+        "advance_prep_minutes": 120,
+        "steps": ["Sear the beef.", "Braise for two hours."]})
+    assert any("belongs in total_time_minutes" in p for p in validate_recipe(misfiled))
+
+    # Falls back to active time when total is missing.
+    assert attended_minutes({"est_time_minutes": 25}) == 25
+    assert attended_minutes({"total_time_minutes": 150, "est_time_minutes": 30}) == 150
+    assert advance_prep({"advance_prep_minutes": None}) == 0
 
     # Gate
     assert needs_reconstruction(good.model_copy(update={"source_sufficiency": "partial"}))

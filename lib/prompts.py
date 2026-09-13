@@ -61,9 +61,40 @@ stove reading this; "olive oil: unspecified" is useless to them.
 - If the source lists no method, infer the minimal sequence the ingredients
   imply.
 
+## Time — three different numbers, and getting them wrong breaks scheduling
+These feed a calendar. The cook's evening is booked from `total_time_minutes`,
+so treat that as the important one.
+
+- **est_time_minutes** — ACTIVE hands-on work only. Chopping, searing,
+  stirring, plating. No waiting of any kind.
+- **total_time_minutes** — the whole span the cook must be AT HOME, from
+  starting to sitting down to eat. Active work PLUS unattended cooking they
+  still have to be around for: braising, roasting, baking, simmering,
+  reducing, proving in a warm oven, resting a roast. For a quick stir-fry this
+  equals est_time_minutes. For a braise it is far larger. Never smaller than
+  est_time_minutes.
+- **advance_prep_minutes** — lead time BEFORE that session during which the
+  cook need not be present at all: marinating, brining, chilling, setting,
+  soaking dried beans, an overnight rise, freezing. 0 if none.
+
+The test is simple: *could they leave the house?* If no, it belongs in
+total_time_minutes. If yes, it belongs in advance_prep_minutes.
+
+| Recipe | est | total | advance |
+|---|---|---|---|
+| 10-minute garlic butter noodles | 10 | 10 | 0 |
+| Palak paneer, 35 min start to finish | 35 | 35 | 0 |
+| Short rib ragu: sear 30 min, braise 2 h | 30 | 150 | 0 |
+| Roast chicken: 20 min prep, 90 min oven, 15 min rest | 20 | 125 | 0 |
+| Fried chicken marinated overnight, fried 20 min | 20 | 30 | 720 |
+| No-bake cheesecake: 20 min assembly, chill 4 h | 20 | 20 | 240 |
+| Focaccia: 20 min work, 8 h rise, 25 min bake | 25 | 45 | 480 |
+
+A two-hour braise recorded as 30 minutes gets scheduled into a 40-minute gap
+and the plan is undeliverable. When a step says "braise for two hours", that
+time is attended.
+
 ## Other fields
-- est_time_minutes is ACTIVE cooking time. Exclude marinating, chilling,
-  resting and rising.
 - If the source contains more than one recipe, extract only the main one — the
   dish the reel is actually about.
 - Include every edible ingredient, salt, oil and water included when called for.

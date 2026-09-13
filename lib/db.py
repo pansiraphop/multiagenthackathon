@@ -66,6 +66,8 @@ def insert_recipe(
     title: str | None = None,
     cuisine: str | None = None,
     est_time_minutes: int | None = None,
+    total_time_minutes: int | None = None,
+    advance_prep_minutes: int = 0,
     servings: int = 2,
     steps: list[str] | None = None,
     extraction_status: str = "pending",
@@ -80,6 +82,12 @@ def insert_recipe(
         "title": title,
         "cuisine": cuisine,
         "est_time_minutes": est_time_minutes,
+        # Falls back to active time when the caller has nothing better. The
+        # planner fits on this, so it must never be null for a success row.
+        "total_time_minutes": (total_time_minutes
+                               if total_time_minutes is not None
+                               else est_time_minutes),
+        "advance_prep_minutes": advance_prep_minutes,
         "servings": servings,
         "steps": steps or [],
         "extraction_status": extraction_status,
