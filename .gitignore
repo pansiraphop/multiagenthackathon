@@ -1,0 +1,14 @@
+# Local planning docs — not for the repo
+.planning/
+
+# Secrets
+.env
+*.token.json
+credentials.json
+token.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
