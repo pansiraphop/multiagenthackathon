@@ -240,10 +240,20 @@ Should accept an "exclude this slot" flag, for the re-plan case in stage 5.
 ### 4 · `shopping_list.py` — what's actually missing
 Reads `meal_plan`, `recipe_ingredients`, `pantry`; writes `shopping_list`.
 
-Sum requirements across the week, group by normalized name + unit, subtract pantry stock
-only when units match exactly (ground rule 4). Filter out `is_non_food()` rows — water,
-pasta water and ice are real recipe ingredients but must never reach a cart. Approximated
-amounts are already real numbers by this point, so they consolidate like any other.
+Sums requirements across the week grouped by **(name, dimension)**, so `2 cup` and
+`100 ml` of the same thing merge into one purchase while `3 tbsp butter` and `250 g
+butter` stay separate — volume-to-mass depends on the ingredient, so it's never inferred
+(ground rule 4). Pantry stock is subtracted on the same rule: it counts when it's the
+same dimension, and a mismatch means buy the full amount.
+
+Two details that matter for how the cart reads. It renders in the recipes' own unit when
+they agreed — `1 tsp turmeric`, not `4.93 ml` — falling back to the base unit only when
+sources disagree, and scaling up large amounts (`1.53 l`, not `1530 ml`). And it never
+lists an ingredient as both bought and pantry-covered, which happens legitimately when one
+recipe wants it by weight and another by count but reads as a contradiction.
+
+`is_non_food()` rows are filtered out: water, pasta water and ice are real recipe
+ingredients but must never reach a cart.
 
 ### 5 · `instacart.py` — cart + delivery window
 Reads `shopping_list`; writes `instacart_orders`.
@@ -389,7 +399,8 @@ source of truth (see `DATABASE.md`). The shared layer is done and tested:
 | `webhook.py` | FastAPI Meta verification + background Reel ingestion on port 8000 |
 | `stages/extract.py` | Agent entrypoint: list/rank pending reels, extract caption±transcript into recipes |
 
-Stages built: **1** `stages/extract.py`, **2** `availability.py`, **3** `plan.py`. Seeds:
+Stages built: **1** `stages/extract.py`, **2** `availability.py`, **3** `plan.py`,
+**4** `shopping_list.py`. Seeds:
 `seed_pantry.py`, `seed_calendar.py`.
 
 Run `python -m lib.normalize`, `python -m lib.schemas`, and `python -m lib.source` for
@@ -405,8 +416,9 @@ python -m lib.schemas                       # schema + validator self-tests
 python -m lib.source                        # transcript reliability self-tests
 python -m stages.extract --list             # pending reels + reliability (needs Supabase)
 python -m stages.extract --best 1           # LIVE extraction of top pending reel
-python -m tests.test_pipeline               # LIVE integration, stages 1+2
-python -m tests.test_pipeline --keep        # ...and leave the rows for the planner
+python -m tests.test_pipeline               # LIVE integration, stages 1-4
+python -m tests.test_pipeline --keep        # ...and leave the rows in place
+python -m tests.test_pipeline --fixtures    # recorded recipes, no model spend
 ```
 
 The unit suites are stdlib `unittest`, deterministic, and hit nothing external — a
