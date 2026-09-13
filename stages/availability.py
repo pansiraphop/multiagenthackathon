@@ -58,32 +58,68 @@ def _merge(intervals: list[tuple[datetime, datetime]]
 # Google free/busy
 # ---------------------------------------------------------------------------
 
+def busy_from_events(items: list[dict]) -> list[tuple[datetime, datetime]]:
+    """Turn Calendar event items into busy intervals in local time.
+
+    Three kinds of event are NOT busy:
+      * our own meals and delivery blocks - otherwise last run's plan shrinks
+        this run's windows and the schedule drifts every time it's re-run
+      * anything marked "free" (transparency), like a reminder or a birthday
+      * cancelled events
+    All-day events block the whole day, which is usually right: an all-day
+    "Travel" genuinely means no cooking.
+    """
+    busy: list[tuple[datetime, datetime]] = []
+    for event in items:
+        if config.CALENDAR_MARKER in (event.get("description") or ""):
+            continue
+        if event.get("transparency") == "transparent":
+            continue
+        if event.get("status") == "cancelled":
+            continue
+
+        start, end = event.get("start") or {}, event.get("end") or {}
+        try:
+            if "dateTime" in start and "dateTime" in end:
+                begin = datetime.fromisoformat(
+                    start["dateTime"]).astimezone(config.TIMEZONE)
+                finish = datetime.fromisoformat(
+                    end["dateTime"]).astimezone(config.TIMEZONE)
+            elif "date" in start and "date" in end:
+                begin = _at(date.fromisoformat(start["date"]), "00:00")
+                finish = _at(date.fromisoformat(end["date"]), "00:00")
+            else:
+                continue
+        except (ValueError, TypeError):
+            continue                      # a malformed event is not a crash
+
+        if finish > begin:
+            busy.append((begin, finish))
+    return busy
+
+
 def _query_freebusy(week_start: date) -> list[tuple[datetime, datetime]]:
-    """Busy intervals for the week, in local time. Raises on API trouble."""
+    """Busy intervals for the week, in local time. Raises on API trouble.
+
+    Uses events().list rather than freebusy().query because free/busy returns
+    bare intervals with no way to tell our own events apart from the user's.
+    """
     from lib.google_auth import calendar_service
 
     service = calendar_service()
     window_start = _at(week_start, "00:00")
     window_end = window_start + timedelta(days=7)
 
-    response = service.freebusy().query(body={
-        "timeMin": window_start.isoformat(),
-        "timeMax": window_end.isoformat(),
-        "timeZone": str(config.TIMEZONE),
-        "items": [{"id": config.GOOGLE_CALENDAR_ID}],
-    }).execute()
+    response = service.events().list(
+        calendarId=config.GOOGLE_CALENDAR_ID,
+        timeMin=window_start.isoformat(),
+        timeMax=window_end.isoformat(),
+        singleEvents=True,               # expand recurring events
+        orderBy="startTime",
+        maxResults=250,
+    ).execute()
 
-    entry = response["calendars"][config.GOOGLE_CALENDAR_ID]
-    if entry.get("errors"):
-        # Most often: the token was granted calendar.events only, so the read
-        # half of the scope is missing.
-        raise RuntimeError(f"free/busy errors: {entry['errors']}")
-
-    return [
-        (datetime.fromisoformat(b["start"]).astimezone(config.TIMEZONE),
-         datetime.fromisoformat(b["end"]).astimezone(config.TIMEZONE))
-        for b in entry.get("busy", [])
-    ]
+    return busy_from_events(response.get("items", []))
 
 
 # ---------------------------------------------------------------------------

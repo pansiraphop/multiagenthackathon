@@ -65,6 +65,11 @@ WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
 # --- time ------------------------------------------------------------------
 TIMEZONE = ZoneInfo(os.environ.get("TIMEZONE", "America/Los_Angeles"))
 
+# Marks every calendar event InstaCook creates. Stage 2 subtracts these from
+# busy time (otherwise our own meals shrink next week's windows and the plan
+# drifts on every re-run) and stage 6 uses it to find what to clear.
+CALENDAR_MARKER = "[instacook]"
+
 # --- cooking windows (stage 2) ---------------------------------------------
 COOK_WINDOW_START = "17:30"   # no 6am cooking
 COOK_WINDOW_END = "21:30"

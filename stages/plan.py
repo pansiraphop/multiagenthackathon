@@ -275,6 +275,53 @@ def add_reasons(assignments: list[dict], pantry: dict[str, dict],
 
 
 # ---------------------------------------------------------------------------
+# the feedback edge: stage 5 -> stage 3
+# ---------------------------------------------------------------------------
+
+def delivery_conflict(week_start: date | None = None) -> dict | None:
+    """Can the groceries actually arrive before the first meal?
+
+    This is the one place the pipeline reconsiders its own output because the
+    physical world said no. If the delivery window ends too late for the
+    earliest cook slot, that slot is unusable and the meal has to move.
+
+    Returns a description of the conflict, or None when the plan is feasible.
+    Reads only database rows, so it never imports stage 5.
+    """
+    week_start = week_start or config.week_start()
+    week = week_start.isoformat()
+
+    orders = db.select("instacart_orders", "*", week_start_date=week)
+    if not orders:
+        return None                      # stage 5 hasn't run; nothing to check
+    order = orders[0]
+    if not order.get("delivery_window_end"):
+        return None                      # advisory window only
+
+    meals = db.select("meal_plan", "*", week_start_date=week)
+    if not meals:
+        return None
+
+    earliest = min(meals, key=lambda m: m["planned_start_time"])
+    starts_at = datetime.fromisoformat(earliest["planned_start_time"])
+    delivery_end = datetime.fromisoformat(order["delivery_window_end"])
+    deadline = starts_at - timedelta(hours=config.DELIVERY_BUFFER_HRS)
+
+    if delivery_end <= deadline:
+        return None
+
+    recipe = db.get_recipe(earliest["recipe_id"]) or {}
+    return {
+        "slot_id": earliest["cook_slot_id"],
+        "meal_id": earliest["id"],
+        "title": recipe.get("title") or earliest["recipe_id"],
+        "planned_start": starts_at,
+        "delivery_end": delivery_end,
+        "short_by_minutes": int((delivery_end - deadline).total_seconds() // 60),
+    }
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 

@@ -17,6 +17,7 @@ from unittest.mock import patch
 import config
 from stages.availability import (
     _at,
+    busy_from_events,
     _fallback_slots,
     _gaps_for_day,
     _merge,
@@ -301,6 +302,71 @@ class BuildSlots(unittest.TestCase):
             )
             self.assertGreaterEqual(row["duration_minutes"], config.MIN_SLOT_MINUTES)
             self.assertLess(row["slot_start"], row["slot_end"])
+
+
+class BusyFromEvents(unittest.TestCase):
+    """What counts as busy. Getting this wrong either double-books the cook or
+    silently shrinks the week."""
+
+    def event(self, start="18:00", end="19:00", **over):
+        body = {
+            "status": "confirmed",
+            "summary": "Meeting",
+            "description": "",
+            "start": {"dateTime": _at(MONDAY, start).isoformat()},
+            "end": {"dateTime": _at(MONDAY, end).isoformat()},
+        }
+        body.update(over)
+        return body
+
+    def test_ordinary_event_is_busy(self) -> None:
+        busy = busy_from_events([self.event()])
+        self.assertEqual(busy, [(_at(MONDAY, "18:00"), _at(MONDAY, "19:00"))])
+
+    def test_our_own_events_are_not_busy(self) -> None:
+        """Last run's meals must not shrink this run's windows. Without this the
+        plan drifts every time the pipeline is re-run - fatal for a demo."""
+        ours = self.event(description="Uses the spinach. " + config.CALENDAR_MARKER)
+        self.assertEqual(busy_from_events([ours]), [])
+
+    def test_marker_anywhere_in_the_description_counts(self) -> None:
+        ours = self.event(description=f"{config.CALENDAR_MARKER} demo data")
+        self.assertEqual(busy_from_events([ours]), [])
+
+    def test_free_events_are_not_busy(self) -> None:
+        """A birthday or a reminder shouldn't block dinner."""
+        self.assertEqual(
+            busy_from_events([self.event(transparency="transparent")]), [])
+
+    def test_cancelled_events_are_not_busy(self) -> None:
+        self.assertEqual(busy_from_events([self.event(status="cancelled")]), [])
+
+    def test_all_day_event_blocks_the_whole_day(self) -> None:
+        """An all-day 'Travel' genuinely means no cooking."""
+        all_day = {
+            "status": "confirmed",
+            "start": {"date": MONDAY.isoformat()},
+            "end": {"date": (MONDAY + timedelta(days=1)).isoformat()},
+        }
+        busy = busy_from_events([all_day])
+        self.assertEqual(busy, [(_at(MONDAY, "00:00"),
+                                 _at(MONDAY + timedelta(days=1), "00:00"))])
+
+    def test_malformed_events_are_skipped_not_fatal(self) -> None:
+        """One broken event must not take down the whole week."""
+        bad = [
+            {"start": {}, "end": {}},
+            {"start": {"dateTime": "not-a-date"}, "end": {"dateTime": "also-not"}},
+            {},
+        ]
+        self.assertEqual(busy_from_events(bad + [self.event()]),
+                         [(_at(MONDAY, "18:00"), _at(MONDAY, "19:00"))])
+
+    def test_zero_length_events_ignored(self) -> None:
+        self.assertEqual(busy_from_events([self.event("18:00", "18:00")]), [])
+
+    def test_empty_list(self) -> None:
+        self.assertEqual(busy_from_events([]), [])
 
 
 if __name__ == "__main__":
