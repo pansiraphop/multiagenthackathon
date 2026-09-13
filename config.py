@@ -39,6 +39,10 @@ APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8000")
 # Instagram webhook ingestion. Caption is always primary; local Whisper is
 # best-effort and may be switched off without disabling the webhook.
 META_VERIFY_TOKEN = os.environ.get("META_VERIFY_TOKEN", "")
+NGROK_URL = os.environ.get("NGROK_URL", "").rstrip("/")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL") or (
+    f"{NGROK_URL}/webhook" if NGROK_URL else ""
+)
 INGEST_TRANSCRIBE = _env_bool("INGEST_TRANSCRIBE", True)
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
 

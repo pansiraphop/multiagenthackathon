@@ -468,10 +468,13 @@ brew install python@3.11 # local Whisper/PyTorch does not yet support Python 3.1
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env     # fill Supabase, META_VERIFY_TOKEN, and other credentials
+cp .env.example .env     # fill Supabase, META_VERIFY_TOKEN, NGROK_URL, and other credentials
 # apply the schema in the Supabase SQL editor
 python seed/seed_pantry.py && python seed/seed_calendar.py
 uvicorn webhook:app --host 0.0.0.0 --port 8000
+# in another terminal: ngrok http 8000
+# set NGROK_URL / WEBHOOK_URL in .env to the printed https URL, and use
+# {WEBHOOK_URL} as the Meta callback (verify token = META_VERIFY_TOKEN)
 python run_week.py --reels reels.txt
 ```
 
