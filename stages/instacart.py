@@ -1,8 +1,13 @@
-"""Stage 5: add missing ingredients to Instacart through Browserbase."""
+"""Stage 5: add missing ingredients to Instacart through Browserbase.
+
+When INSTACART_PLACE_ORDER is on (or --place-order), the same session continues
+through checkout: pick Delivery, choose a window, and click Place order.
+"""
 
 from __future__ import annotations
 
 import argparse
+import re
 import urllib.parse
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -28,6 +33,50 @@ CART_STATE_SELECTORS = (
     "[data-testid*='cart']",
     "a[aria-label*='cart' i]",
     "button[aria-label*='cart' i]",
+)
+LOGIN_SELECTORS = (
+    "a:has-text('Log in')",
+    "button:has-text('Log in')",
+    "a:has-text('Sign in')",
+    "button:has-text('Sign in')",
+)
+# Instacart's marketplace cart is a header drawer, not /store/cart (that 404s).
+VIEW_CART_SELECTORS = (
+    "button[aria-label*='View Cart' i]",
+    "button[aria-label*='cart' i]",
+)
+ENTER_STORE_CART_SELECTORS = (
+    "button:has-text('Continue Shopping')",
+)
+CHECKOUT_BUTTON_SELECTORS = (
+    "button:has-text('Go to checkout')",
+    "button:has-text('Checkout')",
+    "a:has-text('Go to checkout')",
+    "a:has-text('Checkout')",
+    "[data-testid*='checkout' i]",
+)
+DELIVERY_TAB_SELECTORS = (
+    "button:has-text('Delivery')",
+    "[role='tab']:has-text('Delivery')",
+    "a:has-text('Delivery')",
+)
+PLACE_ORDER_SELECTORS = (
+    "button:has-text('Place order')",
+    "button:has-text('Place Order')",
+    "button[aria-label*='Place order' i]",
+)
+ORDER_CONFIRMED_SELECTORS = (
+    "text=/order confirmed/i",
+    "text=/thanks for your order/i",
+    "text=/order placed/i",
+    "text=/your order is confirmed/i",
+    "[data-testid*='order-confirmation' i]",
+)
+PAYMENT_BLOCKER_SELECTORS = (
+    "button:has-text('Add a payment method')",
+    "button:has-text('Add payment')",
+    "text=/add a payment method/i",
+    "text=/card declined/i",
 )
 
 
@@ -65,6 +114,29 @@ def _first_match(page: Any, selectors: tuple[str, ...]) -> Any:
     return locator
 
 
+def _click_first(page: Any, selectors: tuple[str, ...], *, timeout_ms: int | None = None) -> bool:
+    timeout = timeout_ms or config.BROWSER_SELECTOR_TIMEOUT_MS
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if locator.is_visible(timeout=timeout):
+                locator.click(timeout=timeout)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _any_visible(page: Any, selectors: tuple[str, ...], *, timeout_ms: int = 1500) -> bool:
+    for selector in selectors:
+        try:
+            if page.locator(selector).first.is_visible(timeout=timeout_ms):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _cart_state(page: Any) -> str | None:
     for selector in CART_STATE_SELECTORS:
         try:
@@ -81,10 +153,21 @@ def _cart_state(page: Any) -> str | None:
     return None
 
 
+def ensure_logged_in(page: Any) -> None:
+    """Fail fast when the persistent Browserbase context lost its Instacart login."""
+    if _any_visible(page, LOGIN_SELECTORS, timeout_ms=1200):
+        raise RuntimeError(
+            "Instacart session is logged out. Re-run "
+            "`python scripts/instacart_probe.py tomato`, log in through the "
+            "live view, then save BROWSERBASE_CONTEXT_ID."
+        )
+
+
 def search_and_add_item(page: Any, item: dict) -> None:
     """Search one ingredient, add the first result, and verify UI state changed."""
     page.goto(search_url(item["ingredient_name"]), wait_until="domcontentloaded")
     browser_lib.dismiss_overlays(page)
+    ensure_logged_in(page)
 
     before = _cart_state(page)
     add = _first_match(page, ADD_BUTTON_SELECTORS)
@@ -107,11 +190,206 @@ def search_and_add_item(page: Any, item: dict) -> None:
         )
 
 
-def _browser_cart(items: list[dict]) -> dict:
+def _slot_label_matches(label: str, start: datetime, end: datetime) -> bool:
+    """Best-effort match of an Instacart slot label against our delivery window."""
+    text = " ".join(label.lower().split())
+    if not text:
+        return False
+    # Prefer labels that mention a time in our window (e.g. "3:00pm – 4:00pm").
+    times = re.findall(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", text)
+    if not times:
+        # "Arrives between 3pm-5pm" style sometimes omits minutes on one side.
+        return False
+
+    def to_minutes(hour: str, minute: str | None, meridiem: str) -> int:
+        h = int(hour) % 12
+        if meridiem == "pm":
+            h += 12
+        return h * 60 + int(minute or 0)
+
+    slot_minutes = [to_minutes(h, m, ampm) for h, m, ampm in times]
+    window_start = start.hour * 60 + start.minute
+    window_end = end.hour * 60 + end.minute
+    return any(window_start - 30 <= minute <= window_end + 30 for minute in slot_minutes)
+
+
+def _select_delivery_window(
+    page: Any,
+    *,
+    delivery_start: datetime | None,
+    delivery_end: datetime | None,
+) -> None:
+    """Pick Delivery and a time slot overlapping the planned window when possible."""
+    _click_first(page, DELIVERY_TAB_SELECTORS, timeout_ms=2500)
+    page.wait_for_timeout(800)
+
+    if delivery_start is None or delivery_end is None:
+        return
+
+    slot_selectors = (
+        "button[aria-label*='delivery' i]",
+        "button[aria-label*='arrives' i]",
+        "[data-testid*='time-slot' i] button",
+        "[data-testid*='timeslot' i]",
+        "button:has-text('am')",
+        "button:has-text('pm')",
+    )
+    for selector in slot_selectors:
+        try:
+            buttons = page.locator(selector)
+            count = min(buttons.count(), 24)
+            preferred = None
+            for i in range(count):
+                button = buttons.nth(i)
+                if not button.is_visible(timeout=300):
+                    continue
+                label = (
+                    button.get_attribute("aria-label")
+                    or button.inner_text(timeout=500)
+                    or ""
+                )
+                if _slot_label_matches(label, delivery_start, delivery_end):
+                    preferred = button
+                    break
+                if preferred is None:
+                    preferred = button
+            if preferred is not None:
+                preferred.click(timeout=config.BROWSER_SELECTOR_TIMEOUT_MS)
+                page.wait_for_timeout(500)
+                return
+        except Exception:
+            continue
+
+
+def _order_confirmed(page: Any) -> bool:
+    url = (page.url or "").lower()
+    if any(token in url for token in ("/orders/", "/store/orders", "confirmation", "thank")):
+        return True
+    return _any_visible(page, ORDER_CONFIRMED_SELECTORS, timeout_ms=2500)
+
+
+def storefront_url() -> str:
+    if config.INSTACART_RETAILER:
+        retailer = urllib.parse.quote(config.INSTACART_RETAILER.strip(), safe="")
+        return f"{INSTACART_HOME}/store/{retailer}/storefront"
+    return INSTACART_HOME
+
+
+def open_cart_drawer(page: Any) -> None:
+    """Open the header cart drawer (marketplace no longer has /store/cart)."""
+    if not _click_first(page, VIEW_CART_SELECTORS, timeout_ms=5000):
+        raise RuntimeError("Could not find the View Cart button")
+    page.wait_for_timeout(1200)
+    # Multi-retailer accounts land on a Carts list first; enter the configured store.
+    if config.INSTACART_RETAILER:
+        retailer = config.INSTACART_RETAILER.strip()
+        try:
+            named = page.locator(
+                f"button:has-text('{retailer}'), [aria-label*='{retailer}' i]"
+            ).first
+            if named.is_visible(timeout=800):
+                named.click(timeout=config.BROWSER_SELECTOR_TIMEOUT_MS)
+                page.wait_for_timeout(1500)
+                return
+        except Exception:
+            pass
+    if _click_first(page, ENTER_STORE_CART_SELECTORS, timeout_ms=1500):
+        page.wait_for_timeout(2000)
+        # Inside a storefront, open that store's cart drawer again.
+        _click_first(page, VIEW_CART_SELECTORS, timeout_ms=4000)
+        page.wait_for_timeout(1200)
+
+
+def place_order(
+    page: Any,
+    *,
+    delivery_start: datetime | None = None,
+    delivery_end: datetime | None = None,
+) -> str:
+    """Drive cart drawer → checkout_v4 → Place order. Returns confirmation URL."""
+    page.goto(storefront_url(), wait_until="domcontentloaded")
+    browser_lib.dismiss_overlays(page)
+    ensure_logged_in(page)
+    open_cart_drawer(page)
+
+    if not _click_first(page, CHECKOUT_BUTTON_SELECTORS,
+                        timeout_ms=config.BROWSER_CHECKOUT_TIMEOUT_MS):
+        browser_lib.screenshot(page, "checkout-no-button")
+        raise RuntimeError("Could not find a Checkout button in the cart drawer")
+
+    page.wait_for_timeout(2500)
+    browser_lib.dismiss_overlays(page)
+    _select_delivery_window(
+        page, delivery_start=delivery_start, delivery_end=delivery_end
+    )
+
+    if _any_visible(page, PAYMENT_BLOCKER_SELECTORS, timeout_ms=2000):
+        browser_lib.screenshot(page, "checkout-payment-blocker")
+        raise RuntimeError(
+            "Checkout reached payment but no card is on the Instacart account. "
+            "Open the Browserbase live view, click Add a payment method, save a "
+            "card, then re-run with --place-order."
+        )
+
+    if not _click_first(page, PLACE_ORDER_SELECTORS,
+                        timeout_ms=config.BROWSER_CHECKOUT_TIMEOUT_MS):
+        # checkout_v4 shows Continue until the order can be submitted.
+        if not _click_first(page, ("button:has-text('Continue')",),
+                            timeout_ms=5000):
+            browser_lib.screenshot(page, "checkout-no-place-order")
+            raise RuntimeError(
+                "Could not find Place order — add a payment method on the "
+                "Instacart account in the Browserbase live view, then retry."
+            )
+        page.wait_for_timeout(2000)
+        if _any_visible(page, PAYMENT_BLOCKER_SELECTORS, timeout_ms=1500):
+            browser_lib.screenshot(page, "checkout-payment-blocker")
+            raise RuntimeError(
+                "Checkout blocked on payment. Add a card to the Instacart "
+                "account used in Browserbase, then re-run with --place-order."
+            )
+        if not _click_first(page, PLACE_ORDER_SELECTORS,
+                            timeout_ms=config.BROWSER_CHECKOUT_TIMEOUT_MS):
+            browser_lib.screenshot(page, "checkout-no-place-order")
+            raise RuntimeError("Continue did not reveal a Place order button")
+
+    page.wait_for_timeout(2500)
+    deadline = datetime.now().timestamp() + (config.BROWSER_CHECKOUT_TIMEOUT_MS / 1000)
+    while datetime.now().timestamp() < deadline:
+        if _order_confirmed(page):
+            return page.url
+        page.wait_for_timeout(1000)
+
+    if _any_visible(page, PAYMENT_BLOCKER_SELECTORS, timeout_ms=800):
+        browser_lib.screenshot(page, "checkout-payment-blocker")
+        raise RuntimeError(
+            "Checkout blocked on payment. Add a card to the Instacart account "
+            "used in Browserbase, then re-run with --place-order."
+        )
+
+    browser_lib.screenshot(page, "checkout-unconfirmed")
+    raise RuntimeError(
+        f"Place order clicked but confirmation was not detected (url={page.url})"
+    )
+
+
+def _browser_cart(
+    items: list[dict],
+    *,
+    place_order_flag: bool = False,
+    delivery_start: datetime | None = None,
+    delivery_end: datetime | None = None,
+) -> dict:
     added: list[dict] = []
     failed: list[dict] = []
+    order_url: str | None = None
+    checkout_error: str | None = None
 
     with browser_lib.session() as page:
+        page.goto(INSTACART_HOME, wait_until="domcontentloaded")
+        browser_lib.dismiss_overlays(page)
+        ensure_logged_in(page)
+
         for item in items:
             error: Exception | None = None
             retries_used = 0
@@ -150,36 +428,61 @@ def _browser_cart(items: list[dict]) -> dict:
 
         if added:
             try:
-                page.goto(
-                    f"{INSTACART_HOME}/store/cart",
-                    wait_until="domcontentloaded",
-                )
-                cart_url = page.url
+                page.goto(storefront_url(), wait_until="domcontentloaded")
+                open_cart_drawer(page)
+                cart_url = page.url or storefront_url()
             except Exception as exc:
                 # Items already added remain in the persistent cart even if the
                 # remote session closes before the final navigation.
                 print(f"      [warn] cart navigation failed: {exc}")
-                cart_url = f"{INSTACART_HOME}/store/cart"
+                cart_url = storefront_url()
         else:
             cart_url = None
+
+        if place_order_flag and added:
+            try:
+                order_url = place_order(
+                    page,
+                    delivery_start=delivery_start,
+                    delivery_end=delivery_end,
+                )
+                cart_url = order_url
+                print(f"      placed order: {order_url}")
+                log_eval(STAGE, "checkout", True)
+            except Exception as exc:
+                checkout_error = str(exc)
+                browser_lib.screenshot(page, "checkout-failed")
+                print(f"      [warn] checkout failed: {exc}")
+                log_eval(STAGE, "checkout", False, error_message=checkout_error)
+
+    method = "browser_automation"
+    if order_url:
+        method = "browser_ordered"
+    elif place_order_flag and added and checkout_error:
+        method = "browser_automation"  # cart stands; order did not
 
     return {
         "cart_url": cart_url,
         "links": [],
         "added": added,
         "failed": failed,
-        "method": "browser_automation",
+        "method": method,
+        "order_placed": bool(order_url),
+        "checkout_error": checkout_error,
     }
 
 
 def _fallback_links(items: list[dict]) -> dict:
     links = [search_url(item["ingredient_name"]) for item in items]
+    # App CTA should land on the store, not a single search for the first item.
     return {
-        "cart_url": links[0] if links else INSTACART_HOME,
+        "cart_url": storefront_url() if items else INSTACART_HOME,
         "links": links,
         "added": [],
         "failed": list(items),
         "method": "fallback_links",
+        "order_placed": False,
+        "checkout_error": None,
     }
 
 
@@ -231,8 +534,11 @@ def _write_order(week_start: date, result: dict) -> dict:
             ingredient_name=item["ingredient_name"],
         )
 
+    ready_status = (
+        config.ORDERED_STATUS if result.get("order_placed") else config.CART_READY_STATUS
+    )
     for item in result["added"]:
-        mark(item, config.CART_READY_STATUS)
+        mark(item, ready_status)
     failed_status = (
         "fallback_link" if result["method"] == "fallback_links" else "failed"
     )
@@ -245,7 +551,9 @@ def _write_order(week_start: date, result: dict) -> dict:
         row["resolution_status"]
         for row in db.select("shopping_list", "resolution_status", week_start_date=week)
     ]
-    in_cart = sum(s == config.CART_READY_STATUS for s in statuses)
+    in_cart = sum(
+        s in (config.CART_READY_STATUS, config.ORDERED_STATUS) for s in statuses
+    )
     # A resumed top-up that fails leaves a real cart plus a few link-only
     # items. Calling that "fallback_links" would understate the week.
     method = result["method"]
@@ -253,7 +561,7 @@ def _write_order(week_start: date, result: dict) -> dict:
     if method == "fallback_links" and in_cart:
         method = "mixed"
         # Stage 6 should link to the real cart, not to one search page.
-        cart_url = f"{INSTACART_HOME}/store/cart"
+        cart_url = storefront_url()
     row = {
         "week_start_date": week,
         "cart_url": cart_url,
@@ -267,6 +575,10 @@ def _write_order(week_start: date, result: dict) -> dict:
     return db.insert("instacart_orders", row)[0]
 
 
+def _already_ordered(order: dict | None) -> bool:
+    return bool(order and order.get("method") == "browser_ordered")
+
+
 def run(
     week_start: date | None = None,
     *,
@@ -274,16 +586,21 @@ def run(
     fallback_only: bool = False,
     limit: int | None = None,
     force: bool = False,
+    place_order_flag: bool | None = None,
 ) -> dict | None:
     week_start = week_start or config.week_start()
     week = week_start.isoformat()
+    place_order_flag = (
+        config.INSTACART_PLACE_ORDER if place_order_flag is None else place_order_flag
+    )
     rows = db.select("shopping_list", "*", week_start_date=week)
     items, unusable = _cartable(rows)
     if limit is not None:
         items = items[:max(0, limit)]
 
     print(f"[5/6] instacart     week of {week_start} | {len(rows)} rows -> "
-          f"{len(items)} products to search")
+          f"{len(items)} products to search"
+          f"{' | will place order' if place_order_flag else ''}")
     if not rows:
         print("      no shopping_list rows - run stage 4 first")
         if not dry_run:
@@ -299,21 +616,36 @@ def run(
     # order, so a second run must never re-add what is already in the cart.
     existing = db.select("instacart_orders", "*", week_start_date=week)
     order = existing[0] if existing else None
+    if _already_ordered(order) and not force:
+        print(f"      already placed this week's Instacart order "
+              f"({order['item_count']} items) - nothing to do (--force to rebuild)")
+        if not dry_run:
+            log_eval(STAGE, f"{week}:already-ordered", True)
+        return order
+
     if order and not force:
-        if order.get("method") == "browser_automation":
-            pending = [i for i in items
-                       if i.get("resolution_status") != config.CART_READY_STATUS]
-            if not pending:
+        if order.get("method") in config.BROWSER_CART_METHODS:
+            pending = [
+                i for i in items
+                if i.get("resolution_status")
+                not in (config.CART_READY_STATUS, config.ORDERED_STATUS)
+            ]
+            if not pending and not place_order_flag:
                 print(f"      already ordered this week: {order['item_count']} items "
                       f"in the cart - nothing to add (--force to rebuild)")
                 if not dry_run:
                     log_eval(STAGE, f"{week}:already-ordered", True)
                 return order
-            # A previous run part-completed (expired session, flaky selector).
-            # Top up only what is missing; the rest is already in the cart.
-            print(f"      resuming this week's cart: {len(pending)} of {len(items)} "
-                  f"not yet added")
-            items = pending
+            if not pending and place_order_flag:
+                # Cart is full; this run only has to pull checkout through.
+                print("      cart already built - proceeding to Place order")
+                items = []
+            else:
+                # A previous run part-completed (expired session, flaky selector).
+                # Top up only what is missing; the rest is already in the cart.
+                print(f"      resuming this week's cart: {len(pending)} of "
+                      f"{len(items)} not yet added")
+                items = pending
         else:
             # A links-only row means nothing was ever added to a real cart, so
             # retrying the browser cannot duplicate anything.
@@ -325,20 +657,62 @@ def run(
         for item in items:
             print(f"      would add {item['ingredient_name']}: "
                   f"{search_url(item['ingredient_name'])}")
+        if place_order_flag:
+            print("      would also Place order after the cart is filled")
         print("      dry run - no browser session, no writes")
         return dict(_fallback_links(items), method="dry_run")
+
+    delivery_start, delivery_end = _delivery_window(week_start)
 
     if fallback_only:
         result = _fallback_links(items)
         log_eval(STAGE, week, True)
+    elif not items and place_order_flag:
+        # Checkout-only resume: open the existing cart and place the order.
+        def checkout_only() -> dict:
+            with browser_lib.session() as page:
+                page.goto(INSTACART_HOME, wait_until="domcontentloaded")
+                browser_lib.dismiss_overlays(page)
+                ensure_logged_in(page)
+                order_url = place_order(
+                    page,
+                    delivery_start=delivery_start,
+                    delivery_end=delivery_end,
+                )
+                print(f"      placed order: {order_url}")
+                return {
+                    "cart_url": order_url,
+                    "links": [],
+                    "added": [
+                        i for i in _cartable(rows)[0]
+                        if i.get("resolution_status")
+                        in (config.CART_READY_STATUS, config.ORDERED_STATUS)
+                    ],
+                    "failed": [],
+                    "method": "browser_ordered",
+                    "order_placed": True,
+                    "checkout_error": None,
+                }
+
+        result, ok = call_external_api(
+            checkout_only,
+            stage=STAGE,
+            input_ref=f"{week}:checkout",
+        )
+        if not ok or not result:
+            print("      checkout unavailable; leaving the existing cart as-is")
+            return order
     else:
         result, ok = call_external_api(
             _browser_cart,
             items,
+            place_order_flag=place_order_flag,
+            delivery_start=delivery_start,
+            delivery_end=delivery_end,
             stage=STAGE,
             input_ref=week,
         )
-        if not ok or not result or not result["added"]:
+        if not ok or not result or (items and not result["added"]):
             result = _fallback_links(items)
             print("      browser cart unavailable; using search-link fallback")
 
@@ -347,6 +721,7 @@ def run(
         f"      wrote instacart_orders: method={written['method']}, "
         f"added={written['item_count']}, "
         f"unresolved={written['unresolved_item_count']}"
+        f"{', ORDER PLACED' if result.get('order_placed') else ''}"
     )
     return written
 
@@ -366,13 +741,32 @@ def main() -> None:
         action="store_true",
         help="rebuild even if this week already has an order (may duplicate cart items)",
     )
+    parser.add_argument(
+        "--place-order",
+        action="store_true",
+        default=None,
+        help="after filling the cart, continue through Instacart checkout",
+    )
+    parser.add_argument(
+        "--no-place-order",
+        action="store_true",
+        help="fill the cart only, even if INSTACART_PLACE_ORDER=true",
+    )
     args = parser.parse_args()
+    place: bool | None
+    if args.no_place_order:
+        place = False
+    elif args.place_order:
+        place = True
+    else:
+        place = None
     run(
         date.fromisoformat(args.week) if args.week else None,
         dry_run=args.dry_run,
         fallback_only=args.fallback_only,
         limit=args.limit,
         force=args.force,
+        place_order_flag=place,
     )
 
 

@@ -121,10 +121,18 @@ class PlanTools(unittest.TestCase):
         with patch("lib.db.select", return_value=[]), \
              patch("lib.db.successful_recipes", return_value=[self.RECIPE]), \
              patch("stages.availability.run", return_value=[{"id": "s1"}]), \
-             patch("stages.plan.run", return_value=[self.MEAL]) as planner:
+             patch("stages.plan.run", return_value=[self.MEAL]) as planner, \
+             patch("stages.concierge._push_calendar",
+                   return_value=" On your calendar.") as push, \
+             patch("stages.concierge._refresh_shopping",
+                   return_value=" Shopping list updated (5 items).") as shop:
             out = run_tool(concierge.plan_week, replace_existing=True)
         planner.assert_called_once()
+        push.assert_called_once()
+        shop.assert_called_once()
         self.assertIn("Planned 1 meals", out)
+        self.assertIn("calendar", out.lower())
+        self.assertIn("shopping list", out.lower())
 
     def test_no_cook_windows_is_reported(self) -> None:
         with patch("lib.db.select", return_value=[]), \
@@ -323,34 +331,63 @@ class DirectControl(unittest.TestCase):
 
     def test_places_the_meal_and_marks_the_window_taken(self) -> None:
         placed = {"id": "m1", "planned_start_time": self.SATURDAY.isoformat()}
-        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]),              patch("stages.concierge._slots_on", return_value=[self.slot()]),              patch("lib.db.select", return_value=[]),              patch("lib.db.insert", return_value=[placed]),              patch("lib.db.update") as update:
+        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]), \
+             patch("stages.concierge._slots_on", return_value=[self.slot()]), \
+             patch("lib.db.select", return_value=[]), \
+             patch("lib.db.insert", return_value=[placed]), \
+             patch("lib.db.update") as update, \
+             patch("stages.concierge._push_calendar",
+                   return_value=" On your calendar.") as push, \
+             patch("stages.concierge._refresh_shopping",
+                   return_value=" Shopping list updated (3 items)."):
             out = run_tool(concierge.schedule_recipe,
                            recipe="katsu", day="saturday")
         self.assertIn("Saturday", out)
+        self.assertIn("calendar", out.lower())
+        push.assert_called_once()
         update.assert_any_call("cook_slots", "s1", {"assigned": True})
 
-    def test_scheduling_warns_the_shopping_list_is_stale(self) -> None:
+    def test_scheduling_rebuilds_the_shopping_list(self) -> None:
         placed = {"id": "m1", "planned_start_time": self.SATURDAY.isoformat()}
-        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]),              patch("stages.concierge._slots_on", return_value=[self.slot()]),              patch("lib.db.select", return_value=[]),              patch("lib.db.insert", return_value=[placed]),              patch("lib.db.update"):
+        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]), \
+             patch("stages.concierge._slots_on", return_value=[self.slot()]), \
+             patch("lib.db.select", return_value=[]), \
+             patch("lib.db.insert", return_value=[placed]), \
+             patch("lib.db.update"), \
+             patch("stages.concierge._push_calendar",
+                   return_value=" On your calendar."), \
+             patch("stages.concierge._refresh_shopping",
+                   return_value=" Shopping list updated (4 items).") as shop:
             out = run_tool(concierge.schedule_recipe,
                            recipe="katsu", day="saturday")
-        self.assertIn("shopping list", out.lower())
+        shop.assert_called_once()
+        self.assertIn("shopping list updated", out.lower())
 
     def test_moving_something_not_planned_is_explained(self) -> None:
-        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]),              patch("lib.db.select", return_value=[]):
+        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]), \
+             patch("lib.db.select", return_value=[]):
             out = run_tool(concierge.move_meal, recipe="katsu", to_day="sunday")
         self.assertIn("isn't on the plan", out)
 
     def test_removing_frees_the_window(self) -> None:
         meal = {"id": "m1", "recipe_id": "r1", "cook_slot_id": "s1"}
-        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]),              patch("lib.db.select", return_value=[meal]),              patch("lib.db.update") as update,              patch("lib.db.delete_where") as delete:
+        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]), \
+             patch("lib.db.select", return_value=[meal]), \
+             patch("lib.db.update") as update, \
+             patch("lib.db.delete_where") as delete, \
+             patch("stages.concierge._drop_calendar_event") as drop, \
+             patch("stages.concierge._push_calendar", return_value=""), \
+             patch("stages.concierge._refresh_shopping",
+                   return_value=" Shopping list updated (2 items)."):
             out = run_tool(concierge.remove_meal, recipe="katsu")
+        drop.assert_called_once_with(meal)
         update.assert_any_call("cook_slots", "s1", {"assigned": False})
         delete.assert_any_call("meal_plan", id="m1")
         self.assertIn("Dropped", out)
 
     def test_removing_something_absent_is_not_an_error(self) -> None:
-        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]),              patch("lib.db.select", return_value=[]):
+        with patch("lib.db.successful_recipes", return_value=[self.RECIPE]), \
+             patch("lib.db.select", return_value=[]):
             self.assertIn("wasn't on the plan",
                           run_tool(concierge.remove_meal, recipe="katsu"))
 

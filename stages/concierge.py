@@ -52,6 +52,9 @@ How to reply:
 - Numbers and days are the useful part: "Tuesday 7:30pm, 25 minutes" beats
   "I've scheduled that for you."
 - If a tool fails or there's nothing to report, say so plainly in one line.
+- Never tell them a day or time until the scheduling tool has returned —
+  those tools write Google Calendar before they finish, so a time you invent
+  won't be on their calendar yet.
 
 How to act:
 - Use tools for anything factual. Never guess what's planned or in the pantry.
@@ -62,8 +65,9 @@ How to act:
   for those rather than re-planning the whole week around one request.
 - plan_week is for "sort out my week". It replaces everything, so ask first if
   a plan already exists.
-- Changing the plan makes the shopping list stale. Say so; rebuild it if they
-  want.
+- plan_week, schedule_recipe, move_meal and remove_meal already sync Google
+  Calendar and rebuild the shopping list. Don't call sync_calendar or
+  build_shopping_list after them unless a tool result said that step failed.
 - Don't ask permission for reversible things.
 - Plenty of messages aren't requests at all. Answer cooking questions, explain
   a step, suggest a substitution — you don't need a tool to be useful.
@@ -207,7 +211,7 @@ def get_week_plan() -> str:
 
 @beta_tool
 def plan_week(replace_existing: bool = False) -> str:
-    """Plan the week: find free evenings, then fit recipes into them.
+    """Plan the week: find free evenings, fit recipes, then write Google Calendar.
 
     Args:
         replace_existing: Must be true to overwrite a plan that already exists.
@@ -220,6 +224,9 @@ def plan_week(replace_existing: bool = False) -> str:
         return (f"There's already a plan with {len(existing)} meals. "
                 f"Call again with replace_existing=true to redo it.")
 
+    for meal in existing:
+        _drop_calendar_event(meal)
+
     slots = availability.run(week_start=week_start)
     if not slots:
         return "Couldn't read any free cook windows from the calendar."
@@ -227,8 +234,9 @@ def plan_week(replace_existing: bool = False) -> str:
     meals = plan.run(week_start=week_start, use_llm=True)
     if not meals:
         return "Nothing fit the windows available this week."
-    return f"Planned {len(meals)} meals. " + get_week_plan.func()
-
+    cal = _push_calendar(week_start)
+    shop = _refresh_shopping(week_start)
+    return f"Planned {len(meals)} meals.{cal}{shop} " + get_week_plan.func()
 
 @beta_tool
 def get_shopping_list() -> str:
@@ -249,14 +257,15 @@ def get_shopping_list() -> str:
 
 @beta_tool
 def build_shopping_list() -> str:
-    """Work out what to buy for the planned week, subtracting what's in the pantry."""
+    """Work out what to buy for the planned week and link it on Instacart."""
     week_start = config.week_start()
-    rows = shopping_list.run(week_start=week_start)
-    if not rows:
-        return "Nothing to buy - either nothing is planned, or the pantry covers it."
+    msg = _refresh_shopping(week_start).strip()
+    if msg.lower().startswith("nothing to buy"):
+        return msg
+    if msg.lower().startswith("shopping list update failed"):
+        return msg
     pantry = len(usable_pantry())
-    return (f"{len(rows)} items to buy. {pantry} pantry items were taken into "
-            f"account so they're not on the list.")
+    return f"{msg} {pantry} pantry items were taken into account."
 
 
 @beta_tool
@@ -379,6 +388,67 @@ def _minutes_of(slot: dict) -> int:
     return start.hour * 60 + start.minute
 
 
+def _drop_calendar_event(meal: dict) -> None:
+    """Remove one meal's Google Calendar event, if we created one."""
+    event_id = meal.get("calendar_event_id")
+    if not event_id:
+        return
+    try:
+        from lib.external import call_external_api
+        from lib.google_auth import calendar_service
+
+        service = calendar_service()
+        call_external_api(
+            lambda eid: service.events().delete(
+                calendarId=config.GOOGLE_CALENDAR_ID, eventId=eid).execute(),
+            event_id, stage=STAGE, input_ref=meal.get("id") or "")
+    except Exception:
+        # A stale event id must not block editing the plan.
+        pass
+
+
+def _push_calendar(week_start: date) -> str:
+    """Write the current plan to Google Calendar before we tell the user."""
+    from stages import calendar_sync
+
+    try:
+        created = calendar_sync.run(week_start=week_start)
+    except Exception as exc:
+        return f" Calendar sync failed ({exc}) — the plan is saved but not on GCal yet."
+    if created:
+        n = len(created)
+        return f" On your calendar now ({n} new event{'s' if n != 1 else ''})."
+    return " On your calendar."
+
+
+def _refresh_shopping(week_start: date) -> str:
+    """Rebuild the shopping list and leave an Instacart link the app can open."""
+    from stages import instacart
+
+    try:
+        rows = shopping_list.run(week_start=week_start)
+    except Exception as exc:
+        return f" Shopping list update failed ({exc})."
+    if not rows:
+        week = week_start.isoformat()
+        db.delete_where("instacart_orders", week_start_date=week)
+        return " Nothing to buy — pantry covers it, or the plan is empty."
+
+    # Fast path for DMs: always write a cart_url so the app CTA works now.
+    # A full Browserbase fill is slow; run that separately / via CLI when needed.
+    # Never place an order from this path.
+    try:
+        order = instacart.run(
+            week_start=week_start, fallback_only=True, place_order_flag=False)
+    except Exception as exc:
+        return (f" Shopping list updated ({len(rows)} items) but Instacart "
+                f"link failed ({exc}).")
+
+    url = (order or {}).get("cart_url") or "Instacart"
+    return (f" Shopping list updated ({len(rows)} items). "
+            f"Open them on Instacart from the app ({url}).")
+
+
 def _place(recipe: dict, slot: dict, week_start: date, reason: str) -> dict:
     """Write one meal into a slot, clearing whatever occupied either end."""
     week = week_start.isoformat()
@@ -389,6 +459,7 @@ def _place(recipe: dict, slot: dict, week_start: date, reason: str) -> dict:
         same_slot = existing.get("cook_slot_id") == slot["id"]
         same_recipe = existing["recipe_id"] == recipe["id"]
         if same_slot or same_recipe:
+            _drop_calendar_event(existing)
             db.delete_where("meal_plan", id=existing["id"])
             if existing.get("cook_slot_id"):
                 db.update("cook_slots", existing["cook_slot_id"],
@@ -429,7 +500,7 @@ def get_free_windows() -> str:
 
 @beta_tool
 def schedule_recipe(recipe: str, day: str, time: str = "") -> str:
-    """Put one specific recipe on one specific day.
+    """Put one recipe on one day and write it to Google Calendar before returning.
 
     Args:
         recipe: The dish, however the user said it — "the katsu", "katsu curry".
@@ -466,9 +537,10 @@ def schedule_recipe(recipe: str, day: str, time: str = "") -> str:
                      f"You asked for this on {day.title()}.")
         start = datetime.fromisoformat(
             row["planned_start_time"]).astimezone(config.TIMEZONE)
+        cal = _push_calendar(week_start)
+        shop = _refresh_shopping(week_start)
         return (f"{found['title']} is on for {start:%A} at {start:%H:%M}, "
-                f"{attended_minutes(found)} min. The shopping list needs "
-                f"rebuilding to match.")
+                f"{attended_minutes(found)} min.{cal}{shop}")
 
     return (f"{found['title']} won't fit {day.title()}: {problems[0]}. "
             f"Want me to find a day that works?")
@@ -497,16 +569,18 @@ def move_meal(recipe: str, to_day: str, time: str = "") -> str:
 
 @beta_tool
 def remove_meal(recipe: str) -> str:
-    """Take one meal off the week's plan and free that evening up again."""
+    """Take one meal off the week's plan, free that evening, and update Google Calendar."""
     found = _find_recipe(recipe)
     if not found:
         return f"I don't have a recipe matching '{recipe}'."
 
-    week = config.week_start().isoformat()
+    week_start = config.week_start()
+    week = week_start.isoformat()
     removed = 0
     for meal in db.select("meal_plan", "*", week_start_date=week):
         if meal["recipe_id"] != found["id"]:
             continue
+        _drop_calendar_event(meal)
         if meal.get("cook_slot_id"):
             db.update("cook_slots", meal["cook_slot_id"], {"assigned": False})
         db.delete_where("meal_plan", id=meal["id"])
@@ -514,19 +588,20 @@ def remove_meal(recipe: str) -> str:
 
     if not removed:
         return f"{found['title']} wasn't on the plan."
-    return (f"Dropped {found['title']} — that evening is free again, and the "
-            f"shopping list is now out of date.")
+    cal = _push_calendar(week_start)
+    shop = _refresh_shopping(week_start)
+    return (f"Dropped {found['title']} — that evening is free again."
+            f"{cal}{shop}")
 
 
 @beta_tool
 def sync_calendar() -> str:
-    """Write the planned week into Google Calendar as real events."""
-    from stages import calendar_sync
+    """Re-write the planned week into Google Calendar.
 
-    created = calendar_sync.run(week_start=config.week_start())
-    if not created:
-        return "Nothing new to add — the week is already on the calendar."
-    return f"Added {len(created)} events to the calendar."
+    Prefer this only when a previous sync failed, or after shopping adds a cart
+    link that should appear on the events. Scheduling tools already sync.
+    """
+    return _push_calendar(config.week_start()).strip()
 
 
 TOOLS = [

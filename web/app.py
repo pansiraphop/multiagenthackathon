@@ -21,8 +21,8 @@ Supabase key server-side and the page fast on a phone on a kitchen wifi.
 `APP_BASE_URL` must point at wherever this is deployed BEFORE stage 6 runs —
 the cook URL is baked into each calendar description at write time.
 
-Guided cooking is step-by-step: Start plays the opening, Next advances and
-plays the next ElevenLabs segment. Hands stay free except for one thumb tap.
+Guided cooking is one play/pause control: Begin Cooking starts the opening
+beat, then the same button pauses/resumes while segments auto-advance.
 """
 
 from __future__ import annotations
@@ -74,6 +74,14 @@ def _week_order(week_start: date | None = None) -> dict | None:
     return rows[0] if rows else None
 
 
+def _week_shop(week_start: date | None = None) -> list[dict]:
+    week = (week_start or config.week_start()).isoformat()
+    return sorted(
+        db.select("shopping_list", "*", week_start_date=week),
+        key=lambda r: (r.get("ingredient_name") or ""),
+    )
+
+
 def voice_payload(meal: dict) -> dict:
     """Context the cook page ships so guided cooking can start without a second
     round-trip for recipe facts. Segment audio is fetched lazily via
@@ -116,6 +124,7 @@ def index() -> str:
         meals=meals,
         order=_week_order(week_start),
         pantry_covered=covered,
+        shop_items=_week_shop(week_start),
     )
 
 
@@ -137,6 +146,7 @@ def cook(meal_id: str) -> str:
         meal=meal,
         order=_week_order(week),
         voice=voice_payload(meal),
+        shop_items=_week_shop(week),
     )
 
 

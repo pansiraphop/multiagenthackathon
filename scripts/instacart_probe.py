@@ -84,7 +84,8 @@ def run(ingredient: str, wait_seconds: int | None = None) -> None:
 
         if wait_seconds is None:
             input(
-                "\nOpen the live view, log in, set your ZIP/store, dismiss banners, "
+                "\nOpen the live view, log in, set your ZIP/store, add a payment "
+                "method if you want Place order to work, dismiss banners, "
                 "then press Enter here..."
             )
         else:
@@ -94,11 +95,34 @@ def run(ingredient: str, wait_seconds: int | None = None) -> None:
             )
             threading.Event().wait(wait_seconds)
 
+        logged_out = False
+        for selector in (
+            "a:has-text('Log in')",
+            "button:has-text('Log in')",
+            "a:has-text('Sign in')",
+            "button:has-text('Sign in')",
+        ):
+            try:
+                if page.locator(selector).first.is_visible(timeout=800):
+                    logged_out = True
+                    break
+            except Exception:
+                continue
+        if logged_out:
+            print(
+                "\nWARNING: still seeing Log in — stage 5 will refuse to order. "
+                "Finish login in the live view and re-run the probe."
+            )
+        else:
+            print("\nLogin looks present (no Log in button).")
+
         query = urllib.parse.quote(ingredient, safe="")
-        page.goto(
-            f"https://www.instacart.com/store/search/{query}",
-            wait_until="domcontentloaded",
+        search = (
+            f"https://www.instacart.com/store/{config.INSTACART_RETAILER}/search/{query}"
+            if config.INSTACART_RETAILER
+            else f"https://www.instacart.com/store/search/{query}"
         )
+        page.goto(search, wait_until="domcontentloaded")
         page.wait_for_timeout(2500)
 
         print(f"\nSelector candidates for {page.url}:")
@@ -117,6 +141,26 @@ def run(ingredient: str, wait_seconds: int | None = None) -> None:
                 print(f"  {selector!r}: {count}  sample={sample!r}")
             except Exception as exc:  # selector diagnostics must continue
                 print(f"  {selector!r}: ERROR {exc}")
+
+        # Checkout surface smoke check — does not click Place order.
+        try:
+            page.goto(
+                "https://www.instacart.com/store/cart",
+                wait_until="domcontentloaded",
+            )
+            page.wait_for_timeout(1500)
+            for selector in (
+                "button:has-text('Go to checkout')",
+                "button:has-text('Checkout')",
+                "button:has-text('Place order')",
+            ):
+                try:
+                    visible = page.locator(selector).first.is_visible(timeout=800)
+                except Exception:
+                    visible = False
+                print(f"  checkout {selector!r}: {'visible' if visible else 'missing'}")
+        except Exception as exc:
+            print(f"  checkout smoke check skipped: {exc}")
 
         output = Path(config.FAILURE_SHOT_DIR) / "instacart_probe.png"
         output.parent.mkdir(parents=True, exist_ok=True)

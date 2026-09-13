@@ -54,6 +54,10 @@ BROWSERBASE_PROJECT_ID = os.environ.get("BROWSERBASE_PROJECT_ID", "")
 BROWSERBASE_CONTEXT_ID = os.environ.get("BROWSERBASE_CONTEXT_ID", "")
 INSTACART_ZIP = os.environ.get("INSTACART_ZIP", "")
 INSTACART_RETAILER = os.environ.get("INSTACART_RETAILER", "")
+# When true, stage 5 continues past the cart and places the Instacart order
+# (delivery window + Place order). Requires a logged-in Browserbase context
+# with a payment method on the account.
+INSTACART_PLACE_ORDER = _env_bool("INSTACART_PLACE_ORDER", False)
 
 APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8000")
 
@@ -119,6 +123,9 @@ W_SHARED_INGREDIENTS = 0.20
 # One cart per week. Stage 4 keeps this status on re-run so an ingredient that
 # is already in the cart is never ordered a second time.
 CART_READY_STATUS = "added_to_cart"
+ORDERED_STATUS = "ordered"
+# Methods that mean a real Browserbase cart exists (vs search-link fallback).
+BROWSER_CART_METHODS = ("browser_automation", "browser_ordered", "mixed")
 DELIVERY_LEAD_HOURS = 4       # earliest realistic turnaround from ordering
 DELIVERY_BUFFER_HRS = 2       # margin between delivery end and first cook slot
 BROWSER_SELECTOR_TIMEOUT_MS = 8000
@@ -127,6 +134,7 @@ BROWSER_ITEM_RETRIES = 1
 BROWSER_SESSION_TIMEOUT_SECONDS = _env_int(
     "BROWSERBASE_SESSION_TIMEOUT_SECONDS", 1800
 )
+BROWSER_CHECKOUT_TIMEOUT_MS = 45000
 FAILURE_SHOT_DIR = "failures"
 
 # --- follow-up loop (stage 5b) ---------------------------------------------

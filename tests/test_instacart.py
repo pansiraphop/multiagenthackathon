@@ -12,16 +12,30 @@ from stages import instacart
 
 
 class FakePage:
-    def __init__(self, fail_cart_navigation: bool = False):
+    def __init__(self, fail_cart_navigation: bool = False, logged_out: bool = False):
         self.url = "https://www.instacart.com/"
         self.visited: list[str] = []
         self.fail_cart_navigation = fail_cart_navigation
+        self.logged_out = logged_out
+        self._timeouts: list[int] = []
 
     def goto(self, url: str, **_kwargs) -> None:
-        if self.fail_cart_navigation and url.endswith("/store/cart"):
+        if self.fail_cart_navigation and "storefront" in url:
             raise RuntimeError("remote session closed")
         self.url = url
         self.visited.append(url)
+
+    def wait_for_timeout(self, ms: int) -> None:
+        self._timeouts.append(ms)
+
+    def locator(self, selector: str):
+        node = MagicMock()
+        node.count.return_value = 0
+        visible = self.logged_out and "Log in" in selector
+        node.first.is_visible.return_value = visible
+        node.first.get_attribute.return_value = None
+        node.first.inner_text.return_value = ""
+        return node
 
 
 @contextmanager
@@ -55,11 +69,21 @@ class FallbackTests(unittest.TestCase):
             result = instacart._fallback_links([item(1, "red onion & lime")])
 
         self.assertEqual(result["method"], "fallback_links")
+        # App CTA opens the storefront; per-item search URLs stay in links.
+        self.assertEqual(result["cart_url"], "https://www.instacart.com/")
         self.assertEqual(
-            result["cart_url"],
-            "https://www.instacart.com/store/search/red%20onion%20%26%20lime",
+            result["links"],
+            ["https://www.instacart.com/store/search/red%20onion%20%26%20lime"],
         )
         self.assertEqual(len(result["failed"]), 1)
+
+    def test_fallback_cart_url_uses_retailer_storefront(self):
+        with patch.object(config, "INSTACART_RETAILER", "ralphs"):
+            result = instacart._fallback_links([item(1, "butter")])
+        self.assertEqual(
+            result["cart_url"],
+            "https://www.instacart.com/store/ralphs/storefront",
+        )
 
     def test_retailer_slug_is_used_when_configured(self):
         with patch.object(config, "INSTACART_RETAILER", "local market"):
@@ -79,6 +103,7 @@ class BrowserCartTests(unittest.TestCase):
         with (
             patch.object(instacart.browser_lib, "session", return_value=fake_session(page)),
             patch.object(instacart, "search_and_add_item", side_effect=add),
+            patch.object(instacart, "ensure_logged_in"),
             patch.object(instacart.browser_lib, "screenshot") as shot,
             patch.object(instacart, "log_eval"),
             patch.object(config, "BROWSER_ITEM_RETRIES", 0),
@@ -89,7 +114,7 @@ class BrowserCartTests(unittest.TestCase):
         self.assertEqual([r["ingredient_name"] for r in result["failed"]], ["tomato"])
         self.assertEqual(result["method"], "browser_automation")
         shot.assert_called_once_with(page, "item-1")
-        self.assertEqual(page.url, "https://www.instacart.com/store/cart")
+        self.assertIn("instacart.com", page.url)
 
     def test_timeout_is_retried_once_then_succeeds(self):
         page = FakePage()
@@ -104,6 +129,7 @@ class BrowserCartTests(unittest.TestCase):
         with (
             patch.object(instacart.browser_lib, "session", return_value=fake_session(page)),
             patch.object(instacart, "search_and_add_item", side_effect=flaky),
+            patch.object(instacart, "ensure_logged_in"),
             patch.object(instacart.browser_lib, "screenshot") as shot,
             patch.object(instacart, "log_eval") as log,
             patch.object(config, "BROWSER_ITEM_RETRIES", 1),
@@ -124,6 +150,7 @@ class BrowserCartTests(unittest.TestCase):
                 "search_and_add_item",
                 side_effect=TimeoutError("still unavailable"),
             ),
+            patch.object(instacart, "ensure_logged_in"),
             patch.object(instacart.browser_lib, "screenshot") as shot,
             patch.object(instacart, "log_eval"),
             patch.object(config, "BROWSER_ITEM_RETRIES", 1),
@@ -139,13 +166,78 @@ class BrowserCartTests(unittest.TestCase):
         with (
             patch.object(instacart.browser_lib, "session", return_value=fake_session(page)),
             patch.object(instacart, "search_and_add_item"),
+            patch.object(instacart, "ensure_logged_in"),
+            patch.object(instacart, "open_cart_drawer", side_effect=RuntimeError("remote session closed")),
             patch.object(instacart, "log_eval"),
         ):
             result = instacart._browser_cart([item(1, "tomato")])
 
         self.assertEqual(len(result["added"]), 1)
         self.assertFalse(result["failed"])
-        self.assertEqual(result["cart_url"], "https://www.instacart.com/store/cart")
+        self.assertIn("instacart.com", result["cart_url"])
+
+    def test_place_order_marks_browser_ordered(self):
+        page = FakePage()
+        with (
+            patch.object(instacart.browser_lib, "session", return_value=fake_session(page)),
+            patch.object(instacart, "search_and_add_item"),
+            patch.object(instacart, "ensure_logged_in"),
+            patch.object(
+                instacart,
+                "place_order",
+                return_value="https://www.instacart.com/store/orders/abc",
+            ) as checkout,
+            patch.object(instacart, "log_eval"),
+        ):
+            result = instacart._browser_cart(
+                [item(1, "tomato")], place_order_flag=True
+            )
+
+        checkout.assert_called_once()
+        self.assertEqual(result["method"], "browser_ordered")
+        self.assertTrue(result["order_placed"])
+        self.assertEqual(
+            result["cart_url"], "https://www.instacart.com/store/orders/abc"
+        )
+
+    def test_checkout_failure_keeps_cart_method(self):
+        page = FakePage()
+        with (
+            patch.object(instacart.browser_lib, "session", return_value=fake_session(page)),
+            patch.object(instacart, "search_and_add_item"),
+            patch.object(instacart, "ensure_logged_in"),
+            patch.object(
+                instacart,
+                "place_order",
+                side_effect=RuntimeError("no payment method"),
+            ),
+            patch.object(instacart.browser_lib, "screenshot"),
+            patch.object(instacart, "log_eval"),
+        ):
+            result = instacart._browser_cart(
+                [item(1, "tomato")], place_order_flag=True
+            )
+
+        self.assertEqual(result["method"], "browser_automation")
+        self.assertFalse(result["order_placed"])
+        self.assertIn("payment", result["checkout_error"])
+
+    def test_logged_out_session_is_refused(self):
+        page = FakePage(logged_out=True)
+        with self.assertRaisesRegex(RuntimeError, "logged out"):
+            instacart.ensure_logged_in(page)
+
+
+class SlotMatchTests(unittest.TestCase):
+    def test_slot_label_inside_window(self):
+        start = datetime(2026, 9, 14, 16, 0, tzinfo=config.TIMEZONE)
+        end = datetime(2026, 9, 14, 17, 0, tzinfo=config.TIMEZONE)
+        self.assertTrue(
+            instacart._slot_label_matches("3:30pm – 5:00pm", start, end)
+        )
+        self.assertFalse(
+            instacart._slot_label_matches("9:00am – 10:00am", start, end)
+        )
 
 
 class DeliveryWindowTests(unittest.TestCase):
@@ -193,6 +285,7 @@ class CartSelectionTests(unittest.TestCase):
 
 class OncePerWeekTests(unittest.TestCase):
     def _run(self, shopping, order, **kwargs):
+        kwargs.setdefault("place_order_flag", False)
         external = MagicMock(return_value=(
             {
                 "cart_url": "https://www.instacart.com/store/cart",
@@ -200,6 +293,8 @@ class OncePerWeekTests(unittest.TestCase):
                 "added": [],
                 "failed": [],
                 "method": "browser_automation",
+                "order_placed": False,
+                "checkout_error": None,
             },
             True,
         ))
@@ -229,6 +324,30 @@ class OncePerWeekTests(unittest.TestCase):
 
         self.assertEqual(result, order)
         external.assert_not_called()
+
+    def test_placed_order_is_never_ordered_twice(self):
+        order = {"method": "browser_ordered", "item_count": 2,
+                 "unresolved_item_count": 0}
+        shopping = [item(1, "tomato", "ordered"),
+                    item(2, "garlic", "ordered")]
+
+        result, external = self._run(shopping, order, place_order_flag=True)
+
+        self.assertEqual(result, order)
+        external.assert_not_called()
+
+    def test_full_cart_with_place_order_runs_checkout_only(self):
+        order = {"method": "browser_automation", "item_count": 2,
+                 "unresolved_item_count": 0}
+        shopping = [item(1, "tomato", "added_to_cart"),
+                    item(2, "garlic", "added_to_cart")]
+
+        _result, external = self._run(shopping, order, place_order_flag=True)
+
+        external.assert_called_once()
+        self.assertTrue(callable(external.call_args.args[0]))
+        self.assertEqual(external.call_args.kwargs.get("input_ref"),
+                         "2026-09-14:checkout")
 
     def test_partial_week_resumes_only_the_missing_items(self):
         order = {"method": "browser_automation", "item_count": 1,
@@ -273,7 +392,7 @@ class OncePerWeekTests(unittest.TestCase):
             patch.object(instacart, "call_external_api") as external,
             patch.object(instacart, "log_eval"),
         ):
-            result = instacart.run(date(2026, 9, 14), dry_run=True)
+            result = instacart.run(date(2026, 9, 14), dry_run=True, place_order_flag=False)
 
         self.assertEqual(result["method"], "dry_run")
         external.assert_not_called()
@@ -302,6 +421,7 @@ class WriteTests(unittest.TestCase):
             "added": [item(1, "butter", unit="g")],
             "failed": [],
             "method": "browser_automation",
+            "order_placed": False,
         }
         shopping = [item(1, "butter", "added_to_cart", unit="g"),
                     item(2, "butter", "added_to_cart", unit="tbsp")]
@@ -318,6 +438,25 @@ class WriteTests(unittest.TestCase):
         )
         self.assertEqual(row["item_count"], 2)
         self.assertEqual(row["unresolved_item_count"], 0)
+
+    def test_successful_checkout_marks_rows_ordered(self):
+        result = {
+            "cart_url": "https://www.instacart.com/store/orders/abc",
+            "added": [item(1, "tomato")],
+            "failed": [],
+            "method": "browser_ordered",
+            "order_placed": True,
+        }
+        shopping = [item(1, "tomato", "ordered")]
+
+        row, update = self._write(result, shopping)
+
+        self.assertEqual(
+            update.call_args_list[0].args,
+            ("shopping_list", {"resolution_status": "ordered"}),
+        )
+        self.assertEqual(row["method"], "browser_ordered")
+        self.assertEqual(row["item_count"], 1)
 
     def test_counts_come_from_the_week_not_from_this_run(self):
         result = {
@@ -348,7 +487,7 @@ class WriteTests(unittest.TestCase):
         row, _update = self._write(result, shopping)
 
         self.assertEqual(row["method"], "mixed")
-        self.assertEqual(row["cart_url"], "https://www.instacart.com/store/cart")
+        self.assertIn("instacart.com", row["cart_url"])
         self.assertEqual(row["item_count"], 1)
 
 

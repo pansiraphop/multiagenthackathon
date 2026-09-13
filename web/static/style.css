@@ -77,7 +77,16 @@ img { max-width: 100%; display: block; }
   font: 600 0.9375rem/1 var(--ui);
   letter-spacing: -0.022em;
   color: var(--ink); text-decoration: none;
-  display: inline-flex; align-items: baseline; gap: 1px;
+  display: inline-flex; align-items: center; gap: 9px;
+}
+.brand-mark {
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: 48% 52%;
+  flex: 0 0 auto;
+  background: #F3F3F1;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 6%);
 }
 .brand em { font-style: normal; color: var(--accent); }
 
@@ -237,6 +246,30 @@ a:hover { text-decoration-color: currentColor; }
 .panel-row span { color: var(--ink-2); }
 .panel-row b { font-weight: 600; text-align: right; letter-spacing: -0.015em; }
 
+.shop-inline { margin: 28px 0 8px; }
+.shop-items {
+  list-style: none; margin: 0 0 14px; padding: 0;
+  max-height: min(22rem, 50vh);
+  overflow: auto;
+  border-top: 1px solid var(--line-2);
+}
+.shop-items li {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line-2);
+  font-size: 0.875rem;
+}
+.shop-items .shop-name {
+  flex: 1; min-width: 0;
+  overflow-wrap: break-word;
+}
+.shop-items .shop-amt {
+  flex: 0 0 auto;
+  color: var(--ink-2);
+  text-align: right;
+  white-space: nowrap;
+}
+
 /* --- notices ------------------------------------------------------------- */
 
 .notice {
@@ -255,13 +288,13 @@ a:hover { text-decoration-color: currentColor; }
 .rows > li:last-child { border-bottom: 0; }
 
 .check {
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: flex-start; gap: 12px;
   min-height: 48px; padding: 6px 0;
   cursor: pointer; user-select: none;
 }
 .check input { position: absolute; opacity: 0; pointer-events: none; }
 .box {
-  flex: 0 0 auto; width: 18px; height: 18px;
+  flex: 0 0 auto; width: 18px; height: 18px; margin-top: 3px;
   border: 1.5px solid #C9C9C9; border-radius: 4px;
   display: grid; place-items: center;
   transition: background 110ms ease, border-color 110ms ease;
@@ -275,8 +308,17 @@ a:hover { text-decoration-color: currentColor; }
 .check input:checked + .box { background: var(--accent); border-color: var(--accent); }
 .check input:checked + .box::after { opacity: 1; transform: rotate(-45deg) translate(1px,-1px) scale(1); }
 .check input:focus-visible + .box { outline: 2px solid var(--accent); outline-offset: 2px; }
-.check .label { flex: 1; min-width: 0; font-size: 0.9375rem; }
-.check .amount { color: var(--ink-2); font-size: 0.875rem; white-space: nowrap; }
+.check .label {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 0.9375rem; line-height: 1.35;
+  overflow-wrap: break-word;
+}
+.check .amount {
+  flex: 0 1 auto; max-width: min(11rem, 42%);
+  color: var(--ink-2); font-size: 0.875rem; line-height: 1.35;
+  text-align: right; white-space: normal;
+  overflow-wrap: anywhere;
+}
 .check input:checked ~ .label, .check input:checked ~ .amount {
   color: var(--ink-3); text-decoration: line-through;
 }
@@ -317,16 +359,66 @@ a:hover { text-decoration-color: currentColor; }
 
 /* --- guided cooking ------------------------------------------------------ */
 
-.guide {
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid var(--line);
+.cook-cta {
   display: grid;
-  gap: 10px;
+  justify-items: center;
+  gap: 16px;
+  padding: 28px 0 8px;
+  margin-bottom: 8px;
+}
+.cook-btn {
+  width: 168px; height: 168px;
+  border-radius: 50%;
+  border: 0;
+  padding: 20px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  box-shadow: 0 10px 28px rgb(21 104 60 / 22%);
+  transition: background 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+}
+.cook-btn:hover {
+  background: var(--accent-2);
+  transform: translateY(-1px);
+  box-shadow: 0 14px 32px rgb(21 104 60 / 28%);
+}
+.cook-btn:active { transform: translateY(0); }
+.cook-btn:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 4px;
+}
+.cook-btn:disabled {
+  background: var(--sunken);
+  color: var(--ink-3);
+  box-shadow: none;
+  cursor: not-allowed;
+  transform: none;
+}
+.cook-btn[aria-pressed="true"] {
+  background: var(--ink);
+  box-shadow: 0 10px 28px rgb(10 10 10 / 18%);
+}
+.cook-btn[aria-pressed="true"]:hover { background: #1a1a1a; }
+.cook-btn-label {
+  font: 600 1.0625rem/1.2 var(--ui);
+  letter-spacing: -0.02em;
+  max-width: 7.5ch;
+}
+.cook-btn[data-state="playing"] .cook-btn-label,
+.cook-btn[data-state="paused"] .cook-btn-label { max-width: none; }
+
+.guide {
+  width: min(100%, 36rem);
+  display: grid;
+  gap: 8px;
+  text-align: center;
 }
 .guide[hidden] { display: none; }
 .guide-meta {
-  display: flex; justify-content: space-between; gap: 10px;
+  display: flex; justify-content: center; gap: 10px;
   font-size: 0.75rem; color: var(--ink-3);
   text-transform: capitalize;
 }
@@ -343,8 +435,6 @@ a:hover { text-decoration-color: currentColor; }
   color: var(--ink-3);
 }
 #guide-audio { display: none; }
-.btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
-.btn-row .btn { width: 100%; }
 
 /* --- recipe header ------------------------------------------------------- */
 
@@ -392,7 +482,7 @@ input:focus-visible, select:focus-visible {
 }
 .link-remove:hover { color: var(--red); }
 
-/* --- sticky mobile bar --------------------------------------------------- */
+/* --- sticky mobile Instacart bar ---------------------------------------- */
 
 .bar-spacer { height: 84px; }
 .bar {
@@ -409,8 +499,6 @@ input:focus-visible, select:focus-visible {
 }
 .bar .inner > * { flex: 1; }
 .bar .inner > [hidden] { display: none; }
-.bar .note { grid-column: 1/-1; font-size: 0.75rem; color: var(--ink-3);
-             text-align: center; margin: 1px 0 0; }
 
 /* --- misc ---------------------------------------------------------------- */
 
@@ -418,14 +506,11 @@ input:focus-visible, select:focus-visible {
   border: 1px dashed var(--line); border-radius: var(--r);
   padding: 36px 20px; text-align: center; color: var(--ink-2);
 }
-.wrap { padding-bottom: 56px; }
+.wrap { padding-bottom: 80px; }
 
 .shell { display: grid; grid-template-columns: minmax(0, 1fr); gap: 22px; }
 
-/* The rail comes first in the DOM, so on mobile the actions are the first
-   thing you reach — by thumb or by keyboard — and the guide panel is where
-   you're looking when you tap Start. Desktop moves it back to the right. */
-.rail { display: grid; gap: 12px; }
+.rail { display: grid; gap: 12px; min-width: 0; }
 
 /* ===========================================================================
    DESKTOP — not the mobile layout stretched.
@@ -441,10 +526,12 @@ input:focus-visible, select:focus-visible {
 
 @media (min-width: 64rem) {
   .shell { grid-template-columns: minmax(0, 1fr) 19rem; gap: 44px; align-items: start; }
-  .rail { order: 1; position: sticky; top: 78px; }
-  .bar, .bar-spacer { display: none; }
+  .rail { order: 1; position: sticky; top: 78px; max-height: calc(100vh - 96px); overflow: auto; }
   .meals { grid-template-columns: 1fr; }
-  .wrap { padding-block: 40px 0; }
+  .wrap { padding-block: 40px 0; padding-bottom: 80px; }
+  .bar, .bar-spacer { display: none; }
+  /* Cook page puts the shop inline under ingredients — no second rail. */
+  .shell:has(.shop-inline) { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
@@ -465,12 +552,12 @@ input:focus-visible, select:focus-visible {
   .rhead { padding-bottom: 14px; }
   .rhead .meta { margin-top: 7px; }
 
-  /* The panel holding Start guided cooking is the first thing you see. */
-  .rail .panel { padding: 14px; }
+  .cook-cta { padding: 22px 0 4px; }
+  .cook-btn { width: 152px; height: 152px; }
+  .cook-btn-label { font-size: 1rem; }
 
   /* Spoken step text: large, high contrast, comfortable line length. */
   .guide-text { font-size: 1.0625rem; line-height: 1.5; }
-  .guide .btn-row { grid-template-columns: 1fr 1fr; display: grid; gap: 9px; }
 
   /* Checking things off with a thumb, possibly with wet hands. */
   .check { min-height: 52px; }

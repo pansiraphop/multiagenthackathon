@@ -532,23 +532,28 @@ def clean_source_text(text: Any) -> str:
     return s
 
 
-def render_amount(row: dict[str, Any]) -> str:
+def render_amount(row: dict[str, Any], *, compact: bool = False) -> str:
     """Human-readable amount for calendar descriptions and the cook session.
 
     Approximations are shown as "~2 tbsp (a good glug)" — usable, and visibly
-    not the source's own measurement.
+    not the source's own measurement. Pass compact=True for tight UI rows:
+    parenthetical notes are dropped so the checklist stays readable.
     """
     qty, unit = row.get("quantity"), row.get("unit") or "unit"
     note = row.get("qualitative_note")
 
     if qty is None:
+        if compact and note and len(note) > 28:
+            return "to taste" if "taste" in note.lower() else "approx"
         return note or "to taste"
 
     pretty = f"{qty:g}"
     amount = pretty if unit == "unit" else f"{pretty} {unit}"
 
     if row.get("is_approximate"):
-        return f"~{amount} ({note})" if note else f"~{amount}"
+        if note and not compact:
+            return f"~{amount} ({note})"
+        return f"~{amount}"
     return amount
 
 

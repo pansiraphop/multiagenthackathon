@@ -81,7 +81,7 @@
     });
   }
 
-  // --- guided cooking: Next advances and plays the next ElevenLabs segment -
+  // --- guided cooking: one play/pause button for spoken instructions -------
   var ctxEl = document.getElementById("cook-context");
   var context = ctxEl ? JSON.parse(ctxEl.textContent) : null;
 
@@ -89,28 +89,31 @@
     segments: null,
     index: 0,
     loading: false,
+    awaitingNext: false,
     panel: document.getElementById("guide"),
     count: document.getElementById("guide-count"),
     label: document.getElementById("guide-label"),
     text: document.getElementById("guide-text"),
     status: document.getElementById("guide-status"),
     audio: document.getElementById("guide-audio"),
-    nextBtn: document.getElementById("guide-next"),
-    replayBtn: document.getElementById("guide-replay"),
-    startBtns: document.querySelectorAll("[data-guide-start]")
+    toggle: document.getElementById("cook-toggle"),
+    toggleLabel: document.getElementById("cook-btn-label")
   };
 
   function setStatus(msg) {
     if (guide.status) guide.status.textContent = msg || "";
   }
 
+  function setButton(state, label) {
+    if (!guide.toggle) return;
+    guide.toggle.dataset.state = state;
+    guide.toggle.setAttribute("aria-pressed", state === "playing" ? "true" : "false");
+    if (guide.toggleLabel) guide.toggleLabel.textContent = label;
+  }
+
   function setBusy(on) {
     guide.loading = on;
-    guide.startBtns.forEach(function (btn) {
-      btn.disabled = on || (guide.segments !== null);
-    });
-    if (guide.nextBtn) guide.nextBtn.disabled = on;
-    if (guide.replayBtn) guide.replayBtn.disabled = on;
+    if (guide.toggle) guide.toggle.disabled = on;
   }
 
   function highlightStep(stepIndex) {
@@ -137,27 +140,44 @@
   function paintSegment() {
     var seg = guide.segments[guide.index];
     var total = guide.segments.length;
-    guide.count.textContent = "Beat " + (guide.index + 1) + " of " + total;
-    guide.label.textContent = (seg.label || "").replace(/-/g, " ");
-    guide.text.textContent = seg.text;
+    if (guide.count) guide.count.textContent = "Beat " + (guide.index + 1) + " of " + total;
+    if (guide.label) guide.label.textContent = (seg.label || "").replace(/-/g, " ");
+    if (guide.text) guide.text.textContent = seg.text;
     highlightStep(seg.step_index);
-
-    var last = guide.index >= total - 1;
-    guide.nextBtn.textContent = last ? "Done" : "Next";
   }
 
   function prefetch(index) {
     if (!guide.segments || index >= guide.segments.length) return;
-    var url = guide.segments[index].audio_url;
-    // Warm the cache; ignore failure — play() will surface it.
-    fetch(url).catch(function () {});
+    fetch(guide.segments[index].audio_url).catch(function () {});
+  }
+
+  function pauseAfterSection() {
+    var seg = guide.segments[guide.index];
+    if (seg && seg.step_index !== null && seg.step_index !== undefined) {
+      markStepDone(seg.step_index);
+    }
+    if (guide.index >= guide.segments.length - 1) {
+      setStatus("You're done — enjoy.");
+      highlightStep(null);
+      setButton("done", "Done");
+      guide.awaitingNext = false;
+      return;
+    }
+    guide.index += 1;
+    guide.awaitingNext = true;
+    paintSegment();
+    prefetch(guide.index);
+    setButton("paused", "Resume");
+    setStatus("Paused — tap when ready");
   }
 
   function playCurrent() {
     var seg = guide.segments[guide.index];
+    guide.awaitingNext = false;
     setBusy(true);
     setStatus("Loading voice…");
     paintSegment();
+    setButton("playing", "Pause");
 
     guide.audio.pause();
     guide.audio.src = seg.audio_url + "?t=" + Date.now();
@@ -170,7 +190,8 @@
         setBusy(false);
         prefetch(guide.index + 1);
       }).catch(function () {
-        setStatus("Tap Replay if audio was blocked");
+        setStatus("Tap again if audio was blocked");
+        setButton("paused", "Resume");
         setBusy(false);
       });
     } else {
@@ -179,14 +200,41 @@
 
     guide.audio.onended = function () {
       setStatus("");
-      if (seg.step_index !== null && seg.step_index !== undefined) {
-        markStepDone(seg.step_index);
-      }
+      pauseAfterSection();
     };
     guide.audio.onerror = function () {
       setStatus("Couldn't load speech — is ElevenLabs configured?");
+      setButton("paused", "Resume");
       setBusy(false);
     };
+  }
+
+  function pauseGuide() {
+    if (!guide.audio) return;
+    guide.audio.pause();
+    setButton("paused", "Resume");
+    setStatus("Paused");
+  }
+
+  function resumeGuide() {
+    if (!guide.segments) return;
+    // After a section ends we advance and wait — Resume plays the next beat.
+    if (guide.awaitingNext || (guide.audio && guide.audio.ended)) {
+      playCurrent();
+      return;
+    }
+    var playPromise = guide.audio.play();
+    setButton("playing", "Pause");
+    if (playPromise && playPromise.then) {
+      playPromise.then(function () {
+        setStatus("Playing");
+      }).catch(function () {
+        setStatus("Tap again if audio was blocked");
+        setButton("paused", "Resume");
+      });
+    } else {
+      setStatus("Playing");
+    }
   }
 
   function startGuide() {
@@ -196,9 +244,7 @@
     }
     setBusy(true);
     setStatus("Writing detailed steps…");
-    guide.startBtns.forEach(function (btn) {
-      btn.textContent = "Preparing…";
-    });
+    setButton("loading", "Preparing…");
 
     fetch(context.guidance_url + "?force=0")
       .then(function (res) {
@@ -210,72 +256,34 @@
         if (!guide.segments.length) throw new Error("empty guidance");
         guide.index = 0;
         if (guide.panel) guide.panel.hidden = false;
-        guide.startBtns.forEach(function (btn) {
-          btn.hidden = true;
-        });
-        var mobile = document.getElementById("voice-mobile");
-        if (mobile) {
-          // On mobile the sticky bar should become Next, not stay hidden.
-          mobile.hidden = false;
-          mobile.textContent = "Next";
-          mobile.removeAttribute("data-guide-start");
-          mobile.dataset.guideNext = "1";
-          mobile.disabled = false;
-        }
         playCurrent();
       })
       .catch(function () {
         setStatus("Couldn't load guidance");
-        guide.startBtns.forEach(function (btn) {
-          btn.disabled = false;
-          btn.textContent = "Start guided cooking";
-        });
+        setButton("idle", "Begin Cooking");
         setBusy(false);
       });
   }
 
-  function nextGuide() {
-    if (!guide.segments || guide.loading) return;
-    var prev = guide.segments[guide.index];
-    if (prev && prev.step_index !== null && prev.step_index !== undefined) {
-      markStepDone(prev.step_index);
-    }
-    if (guide.index >= guide.segments.length - 1) {
-      setStatus("You're done — enjoy.");
-      highlightStep(null);
-      guide.nextBtn.disabled = true;
-      guide.nextBtn.textContent = "Done";
-      var mobile = document.getElementById("voice-mobile");
-      if (mobile && mobile.dataset.guideNext) {
-        mobile.disabled = true;
-        mobile.textContent = "Done";
-      }
-      guide.audio.pause();
+  function onToggle() {
+    if (guide.loading) return;
+    if (!guide.segments) {
+      startGuide();
       return;
     }
-    guide.index += 1;
-    playCurrent();
+    if (guide.toggle && guide.toggle.dataset.state === "done") return;
+    if (guide.audio && !guide.audio.paused && !guide.audio.ended) {
+      pauseGuide();
+    } else {
+      resumeGuide();
+    }
   }
 
-  guide.startBtns.forEach(function (btn) {
-    btn.addEventListener("click", startGuide);
-  });
-  if (guide.nextBtn) guide.nextBtn.addEventListener("click", nextGuide);
-  if (guide.replayBtn) {
-    guide.replayBtn.addEventListener("click", function () {
-      if (guide.segments) playCurrent();
-    });
-  }
-
-  // Mobile sticky bar becomes Next once guidance has started.
-  document.addEventListener("click", function (e) {
-    var t = e.target;
-    if (t && t.dataset && t.dataset.guideNext) nextGuide();
-  });
+  if (guide.toggle) guide.toggle.addEventListener("click", onToggle);
 
   window.InstaCook = {
     context: context,
     startVoice: startGuide,
-    nextVoice: nextGuide
+    toggleVoice: onToggle
   };
 })();
