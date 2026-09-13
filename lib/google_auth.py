@@ -125,5 +125,5 @@ if __name__ == "__main__":
     entry = fb["calendars"][config.GOOGLE_CALENDAR_ID]
     if entry.get("errors"):
         raise SystemExit(f"free/busy returned errors: {entry['errors']}")
-    print(f"  free/busy OK — {len(entry.get('busy', []))} busy blocks in the next 7 days")
+    print(f"  free/busy OK - {len(entry.get('busy', []))} busy blocks in the next 7 days")
     print("google_auth: read and write scopes verified")

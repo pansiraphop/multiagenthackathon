@@ -6,6 +6,8 @@
 *.token.json
 credentials.json
 token.json
+# Google downloads the OAuth client under this name -- ignore it wherever it lands
+client_secret*.json
 
 # Python
 __pycache__/
