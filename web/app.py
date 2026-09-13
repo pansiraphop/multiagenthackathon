@@ -57,6 +57,7 @@ def _week_meals(week_start: date | None = None) -> list[dict]:
     return [m for m in meals if m["recipe"]]
 
 
+
 def _week_order(week_start: date | None = None) -> dict | None:
     """The week's Instacart order.
 
@@ -97,10 +98,21 @@ def voice_payload(meal: dict) -> dict:
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     week_start = config.week_start()
+    meals = _week_meals(week_start)
+
+    # How many distinct ingredients the pantry already covers, so the week can
+    # say what it saved rather than only what it costs.
+    pantry = set(usable_pantry())
+    wanted = {i["name"] for m in meals
+              for i in (m["recipe"].get("recipe_ingredients")
+                        or m["recipe"].get("ingredients") or [])}
+    covered = len(wanted & pantry)
+
     return views.week_page(
         week_start=week_start,
-        meals=_week_meals(week_start),
+        meals=meals,
         order=_week_order(week_start),
+        pantry_covered=covered,
     )
 
 
