@@ -37,6 +37,11 @@ model Recipe {
   id     String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   source_url String?
 
+  // The Instagram-scoped id of whoever DM'd the reel. Kept because stage 5b
+  // messages that person back when the week needs a decision, and because the
+  // swap options it offers are that user's own previously-sent reels.
+  sender_id String?
+
   // Populated by extraction; a freshly-created row is `extraction_status =
   // 'pending'` and therefore has none of these yet.
   title            String?
@@ -221,6 +226,60 @@ model InstacartOrder {
   updated_at DateTime @default(now()) @db.Timestamptz
 
   @@map("instacart_orders")
+}
+
+// ---------------------------------------------------------------------------
+// Stage 5b — followup.py (the loop back to the user)
+// ---------------------------------------------------------------------------
+
+/// One question the agent asked over Instagram DM, and what came back.
+///
+/// This table is what makes the feedback edge auditable: every time the
+/// physical world said no, there is a row here holding the question, the
+/// options offered, the reply, and what the agent then did about it.
+model Followup {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  week_start_date DateTime @db.Date
+
+  /// 'delivery_conflict'   — groceries can't land before the earliest cook slot
+  /// 'missing_ingredients' — the cart could not resolve some items
+  kind String
+
+  /// Informational only, and deliberately NOT a foreign key: stage 3 rebuilds
+  /// meal_plan with delete-then-insert, so this id may point at a replaced row
+  /// by the time a reply arrives. Everything needed to act on an answer is
+  /// carried in `options` instead, keyed on ids that survive a re-plan.
+  meal_plan_id String? @db.Uuid
+
+  recipient_id String?
+  /// 'instagram_dm' when the Send API accepted it, 'console' when there was no
+  /// token and the question was only printed — nobody can answer that one.
+  channel String @default("instagram_dm")
+
+  question String
+  /// [{key, action, label, recipe_id?, slot_id?}] — action is
+  /// 'later' | 'swap' | 'keep'.
+  options Json @db.JsonB
+
+  /// 'sent' -> 'answered' | 'unreachable' | 'superseded'
+  status              String  @default("sent")
+  provider_message_id String?
+  reply_text          String?
+  chosen_key          String?
+  /// What the agent actually did, in one line, for the brief.
+  resolution String?
+
+  /// Bounded by FOLLOWUP_MAX_ROUNDS so question -> answer -> re-plan cannot
+  /// ping-pong forever.
+  round Int @default(1)
+
+  answered_at DateTime? @db.Timestamptz
+  created_at  DateTime  @default(now()) @db.Timestamptz
+  updated_at  DateTime  @default(now()) @db.Timestamptz
+
+  @@index([week_start_date, status])
+  @@index([recipient_id, status])
+  @@map("followups")
 }
 
 // ---------------------------------------------------------------------------

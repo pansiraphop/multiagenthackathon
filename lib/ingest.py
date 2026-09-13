@@ -85,6 +85,7 @@ def persist_pending_recipe(
     source_url: str,
     caption: str | None,
     transcript: str | None,
+    sender_id: str | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Insert one pending recipe, or return the existing row for this URL."""
     existing = db.select("recipes", "*", source_url=source_url)
@@ -93,6 +94,9 @@ def persist_pending_recipe(
 
     row = db.insert_recipe(
         source_url=source_url,
+        # Kept so stage 5b can DM the person who sent the reel, and so the
+        # swap options it offers are their own earlier reels.
+        sender_id=sender_id,
         raw_caption=caption,
         raw_transcript=transcript,
         extraction_status="pending",
@@ -118,6 +122,7 @@ def ingest_reel(reel: ReelIngest) -> dict[str, Any] | None:
             reel.source_url,
             reel.caption,
             transcript,
+            reel.sender_id,
         )
         if inserted:
             log_eval(

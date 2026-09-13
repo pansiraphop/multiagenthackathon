@@ -10,6 +10,11 @@ and it is still being built, so nothing here touches Instacart unless you ask
 for it by name. Everything else is safe to re-run: every stage is idempotent
 and the calendar can be rolled back with `--clear`.
 
+Stage 5b (`stages/followup.py`) runs after the cart and closes the loop: if the
+week is no longer feasible it DMs the user with options instead of quietly
+re-planning. The answer arrives through `webhook.py`, not through this script,
+so a run can legitimately end with a question outstanding.
+
 The narration is the point. Each stage prints what it decided, so the run reads
 as reasoning rather than as a log.
 """
@@ -25,7 +30,8 @@ from lib import db
 from lib.evals import format_report
 from stages import availability, calendar_sync, plan, shopping_list
 
-STAGES = ("extract", "availability", "plan", "shopping", "instacart", "calendar")
+STAGES = ("extract", "availability", "plan", "shopping", "instacart",
+          "followup", "calendar")
 
 
 def _rule(text: str = "") -> None:
@@ -50,31 +56,24 @@ def run_extract() -> int:
     return done
 
 
-def handle_delivery_conflict(week_start: date, use_llm: bool) -> bool:
+def handle_feedback(week_start: date, use_llm: bool, dry_run: bool = False) -> bool:
     """The feedback edge: stage 5's answer can invalidate stage 3's plan.
 
-    If the groceries can't arrive before the earliest cook slot, that slot is
-    unusable. Re-plan without it and rebuild the shopping list. This is the one
-    place the pipeline reconsiders its own output because the physical world
-    said no — and it's the clearest answer to "is this an agent or a cron job?"
+    If the groceries can't land before the earliest cook slot, or the cart
+    couldn't resolve what a meal needs, the week isn't feasible any more. Stage
+    5b asks the user over Instagram DM — reschedule, or swap in one of their own
+    earlier reels — and only resolves it alone when nobody can be reached.
+
+    This is the one place the pipeline reconsiders its own output because the
+    physical world said no, and it's the clearest answer to "is this an agent or
+    a cron job?"
     """
-    conflict = plan.delivery_conflict(week_start)
-    if not conflict:
-        return False
+    from stages import followup
 
     print()
-    print(f"[!]   delivery conflict")
-    print(f"      {conflict['title']} is planned for "
-          f"{conflict['planned_start']:%a %H:%M}, but the groceries don't land "
-          f"until {conflict['delivery_end']:%a %H:%M}")
-    print(f"      {conflict['short_by_minutes']} minutes too late - re-planning "
-          f"without that window")
+    issue = followup.run(week_start=week_start, use_llm=use_llm, dry_run=dry_run)
     print()
-
-    plan.run(week_start=week_start, use_llm=use_llm,
-             exclude_slots=(conflict["slot_id"],))
-    shopping_list.run(week_start=week_start)
-    return True
+    return issue is not None
 
 
 def main() -> int:
@@ -90,6 +89,8 @@ def main() -> int:
                         help="skip the score_reason model call")
     parser.add_argument("--offline", action="store_true",
                         help="skip Google free/busy, use fallback slots")
+    parser.add_argument("--voiceover", action="store_true",
+                        help="also narrate the week with ElevenLabs (stage 7)")
     args = parser.parse_args()
 
     week_start = date.fromisoformat(args.week) if args.week else config.week_start()
@@ -125,12 +126,23 @@ def main() -> int:
         if args.instacart and not args.dry_run:
             from stages import instacart
             instacart.run(week_start=week_start)
-            handle_delivery_conflict(week_start, use_llm)
         else:
             print("[5/6] instacart     skipped (pass --instacart to build a cart)")
 
+    # Reads rows only, so it still checks whatever cart an earlier run left
+    # behind — and on a dry run it decides out loud without sending anything.
+    if begin <= STAGES.index("followup"):
+        handle_feedback(week_start, use_llm, dry_run=args.dry_run)
+
     if begin <= STAGES.index("calendar"):
         calendar_sync.run(week_start=week_start, dry_run=args.dry_run)
+
+    # Stage 7 is a separate workflow, not a link in the chain: it reads the
+    # rows the run just wrote and nothing depends on what it produces, so it
+    # is opt-in and can never take the pipeline down with it.
+    if args.voiceover:
+        from stages import voiceover
+        voiceover.run_week(week_start=week_start, script_only=args.dry_run)
 
     _rule()
     print(format_report())

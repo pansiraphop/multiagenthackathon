@@ -19,7 +19,8 @@ from lib import db
 
 STAGES = (
     "ingestion", "extraction", "availability", "planning",
-    "shopping_list", "instacart", "calendar",
+    "shopping_list", "instacart", "followup", "instagram_dm",
+    "calendar", "voiceover",
 )
 
 

@@ -60,9 +60,10 @@ APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8000")
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
 ELEVENLABS_AGENT_ID = os.environ.get("ELEVENLABS_AGENT_ID", "")
 ELEVENLABS_API_BASE = os.environ.get("ELEVENLABS_API_BASE", "https://api.elevenlabs.io")
-# Rachel, on every ElevenLabs account by default. Override with a voice id or
-# a voice name from `python -m stages.voiceover --voices`.
-ELEVENLABS_VOICE = os.environ.get("ELEVENLABS_VOICE", "21m00Tcm4TlvDq8ikWAM")
+# Sarah. Deliberately not Rachel: the classic premade voices are now library
+# voices, which a free account cannot use over the API (HTTP 402). Override
+# with an id, or a name from `python -m stages.voiceover --voices`.
+ELEVENLABS_VOICE = os.environ.get("ELEVENLABS_VOICE", "EXAVITQu4vr4xnSDxMaL")
 ELEVENLABS_MODEL = os.environ.get("ELEVENLABS_MODEL", "eleven_multilingual_v2")
 ELEVENLABS_OUTPUT_FORMAT = os.environ.get("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128")
 ELEVENLABS_TIMEOUT_SECONDS = _env_int("ELEVENLABS_TIMEOUT_SECONDS", 120)
@@ -76,6 +77,17 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL") or (
 )
 INGEST_TRANSCRIBE = _env_bool("INGEST_TRANSCRIBE", True)
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
+
+# Outbound DMs (stage 5b). The Instagram Send API needs a token for the
+# professional account the reels were sent to; without one the agent prints the
+# question instead and resolves the week on its own.
+INSTAGRAM_ACCESS_TOKEN = os.environ.get("INSTAGRAM_ACCESS_TOKEN", "")
+INSTAGRAM_API_BASE = os.environ.get("INSTAGRAM_API_BASE", "https://graph.instagram.com")
+INSTAGRAM_API_VERSION = os.environ.get("INSTAGRAM_API_VERSION", "v23.0")
+# Fallback recipient for demo runs on seeded reels that carry no sender_id.
+# Your own Instagram-scoped id (IGSID), which the webhook logs on first contact.
+INSTAGRAM_DM_RECIPIENT = os.environ.get("INSTAGRAM_DM_RECIPIENT", "")
+DM_TIMEOUT_SECONDS = _env_int("INSTAGRAM_DM_TIMEOUT_SECONDS", 20)
 
 # --- time ------------------------------------------------------------------
 TIMEZONE = ZoneInfo(os.environ.get("TIMEZONE", "America/Los_Angeles"))
@@ -116,6 +128,15 @@ BROWSER_SESSION_TIMEOUT_SECONDS = _env_int(
     "BROWSERBASE_SESSION_TIMEOUT_SECONDS", 1800
 )
 FAILURE_SHOT_DIR = "failures"
+
+# --- follow-up loop (stage 5b) ---------------------------------------------
+# One round is: question -> reply -> re-plan -> re-check. The bound is what
+# makes the loop a loop rather than a hang: after this many rounds the agent
+# stops asking, resolves the week itself, and says so.
+FOLLOWUP_MAX_ROUNDS = 3
+FOLLOWUP_SWAP_OPTIONS = 2     # previously-sent reels offered as alternatives
+# Ingredients the cart could not resolve. Both statuses mean "not in the cart".
+UNRESOLVED_STATUSES = ("failed", "fallback_link")
 
 # --- normalization vocabulary ----------------------------------------------
 UNITS = ("g", "kg", "ml", "l", "cup", "tbsp", "tsp", "unit")

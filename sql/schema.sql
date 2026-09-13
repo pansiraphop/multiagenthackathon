@@ -8,6 +8,7 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE TABLE "recipes" (
     "id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "source_url" TEXT,
+    "sender_id" TEXT,
     "title" TEXT,
     "cuisine" TEXT,
     "est_time_minutes" INTEGER,
@@ -119,6 +120,29 @@ CREATE TABLE "instacart_orders" (
 );
 
 -- CreateTable
+CREATE TABLE "followups" (
+    "id" UUID NOT NULL DEFAULT gen_random_uuid(),
+    "week_start_date" DATE NOT NULL,
+    "kind" TEXT NOT NULL,
+    "meal_plan_id" UUID,
+    "recipient_id" TEXT,
+    "channel" TEXT NOT NULL DEFAULT 'instagram_dm',
+    "question" TEXT NOT NULL,
+    "options" JSONB NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'sent',
+    "provider_message_id" TEXT,
+    "reply_text" TEXT,
+    "chosen_key" TEXT,
+    "resolution" TEXT,
+    "round" INTEGER NOT NULL DEFAULT 1,
+    "answered_at" TIMESTAMPTZ,
+    "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "followups_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
 CREATE TABLE "eval_log" (
     "id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "stage" TEXT NOT NULL,
@@ -158,6 +182,12 @@ CREATE UNIQUE INDEX "shopping_list_week_start_date_ingredient_name_unit_key" ON 
 
 -- CreateIndex
 CREATE UNIQUE INDEX "instacart_orders_week_start_date_key" ON "instacart_orders"("week_start_date");
+
+-- CreateIndex
+CREATE INDEX "followups_week_start_date_status_idx" ON "followups"("week_start_date", "status");
+
+-- CreateIndex
+CREATE INDEX "followups_recipient_id_status_idx" ON "followups"("recipient_id", "status");
 
 -- CreateIndex
 CREATE INDEX "eval_log_stage_created_at_idx" ON "eval_log"("stage", "created_at");

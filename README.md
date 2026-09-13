@@ -30,11 +30,18 @@ Google Calendar ──▶ [2 availability] ──▶ cook_slots
                                            ▼
                                     [3 plan] ──▶ meal_plan
                                            │        ▲
-                                           ▼        │ re-plan if delivery
-                              [4 shopping_list]     │ can't arrive in time
+                                           ▼        │ apply the answer
+                              [4 shopping_list]     │ (reschedule / swap)
                                            │        │
                                            ▼        │
-                               [5 instacart] ───────┘
+                               [5 instacart]        │
+                                           │        │
+                                           ▼        │
+                              [5b followup] ────────┘
+                                    │      ▲
+                     asks ──────────┘      └────────── answers
+                       │                                  │
+              Instagram DM (write) ─────▶ you ─────▶ webhook.py
                                            │
                                            ▼
                     [6 calendar_sync] ──▶ Google Calendar (write)
@@ -43,7 +50,10 @@ Google Calendar ──▶ [2 availability] ──▶ cook_slots
                             [7 web app]  ← recipe page + pantry, §6
 ```
 
-Six pipeline stages plus a web app the calendar links to. Each stage is a standalone script with one job.
+Six pipeline stages plus a web app the calendar links to. Each stage is a standalone script
+with one job. **Stage 5b is the only cycle in the graph**, and it only closes through a
+human: when the physical world makes the plan infeasible, the agent asks the person who
+saved the reels and applies what they choose.
 
 **Stages never import each other — they communicate only through Supabase rows.** That's
 the whole reason two people can build this in parallel: either of us can hand-insert rows
@@ -114,18 +124,28 @@ stages depend on. Add whatever else you need.
 
 | Table | Key columns | Written by |
 |---|---|---|
-| `recipes` | `id`, `source_url`, `title`, `cuisine`, `est_time_minutes`, `total_time_minutes`, `advance_prep_minutes`, `servings`, `steps` (jsonb), `raw_caption`, `raw_transcript`, `extraction_status`, `provenance`, `source_sufficiency` | 1 |
+| `recipes` | `id`, `source_url`, `sender_id`, `title`, `cuisine`, `est_time_minutes`, `total_time_minutes`, `advance_prep_minutes`, `servings`, `steps` (jsonb), `raw_caption`, `raw_transcript`, `extraction_status`, `provenance`, `source_sufficiency` | 1 |
 | `recipe_ingredients` | `recipe_id`, `name`, `quantity`, `unit`, `is_approximate`, `qualitative_note` | 1 |
 | `pantry` | `ingredient_name`, `quantity`, `unit`, `expiry_date` | seed |
 | `cook_slots` | `week_start_date`, `slot_start`, `slot_end`, `duration_minutes`, `suitability_score`, `assigned` | 2 |
 | `meal_plan` | `id`, `recipe_id`, `cook_slot_id`, `week_start_date`, `planned_start_time`, `planned_end_time`, `score`, `score_reason`, `calendar_event_id`, `status` | 3, 6 |
 | `shopping_list` | `week_start_date`, `ingredient_name`, `quantity_needed`, `unit`, `resolution_status` | 4, 5 |
 | `instacart_orders` | `week_start_date`, `cart_url`, `item_count`, `unresolved_item_count`, `delivery_window_start`, `delivery_window_end`, `delivery_event_id`, `method` | 5, 6 |
+| `followups` | `week_start_date`, `kind`, `meal_plan_id`, `recipient_id`, `channel`, `question`, `options` (jsonb), `status`, `reply_text`, `chosen_key`, `resolution`, `round` | 5b |
 | `eval_log` | `stage`, `input_ref`, `success`, `retry_count`, `duration_ms`, `error_message` | all |
 
 `shopping_list.resolution_status` is `pending` → `added_to_cart` (in this week's cart, never
 ordered again) / `failed` (browser couldn't add it) / `fallback_link` (search link only).
 `instacart_orders.method` is `browser_automation` / `fallback_links` / `mixed`.
+
+`recipes.sender_id` is the Instagram-scoped id of whoever DM'd the reel. Stage 5b messages
+that person back, and the swap options it offers are that person's own earlier reels.
+
+`followups.kind` is `delivery_conflict` / `missing_ingredients`; `status` is `sent` →
+`answered` / `unreachable` (no DM channel, so the agent decided alone) / `superseded` (a
+newer question replaced it). `options` is `[{key, action, label, recipe_id?, slot_id?}]`
+where `action` is `later` / `swap` / `keep` — and it is deliberately the only thing needed
+to act on a reply, since `meal_plan_id` may point at a row that stage 3 has since replaced.
 
 `meal_plan.id` is the stable handle for a single meal. **The cook-session URL in §6 is
 built from it**, so don't regenerate those rows once the calendar has been written.
@@ -318,9 +338,62 @@ the items it topped up.
 without a browser session, a database write, or even an `eval_log` row.
 
 Pick a delivery window that ends comfortably before the earliest cook slot. If nothing
-feasible exists, re-run `plan.py` excluding that slot so the meal moves later, and log the
-re-plan. **That feedback edge is the strongest answer to "is this an agent or a cron
-job?"** — build it once 1–6 are green.
+feasible exists, that is not stage 5's decision to make on its own — see stage 5b.
+
+### 5b · `followup.py` — ask, don't guess
+Reads `instacart_orders` + `meal_plan` + `shopping_list` + `recipes`; writes `followups`,
+sends an Instagram DM, and re-runs stages 3, 4 and 6 when an answer arrives.
+
+Two things can invalidate a finished plan, and neither is a bug: the groceries can't land
+before the earliest cook slot, or the cart couldn't resolve what a meal needs. Both could
+be resolved silently — drop the slot, re-plan around it — and that is a reasonable
+*fallback* but a poor *first move*, because only the user knows whether they'd rather move
+Monday's dinner, cook something else that night, or pick up two things themselves.
+
+So the agent asks, in the same Instagram thread the reels arrived in, and every option is
+concrete:
+
+```
+Heads up - the groceries don't land until Mon 20:30, which is 220 minutes
+too late for Weeknight Palak Paneer at Mon 18:50.
+
+Reply with a number:
+1. Move Weeknight Palak Paneer later this week
+2. Cook Rigatoni alla Vodka with Cherry Tomatoes that night instead
+3. Keep it and I'll shop for the rest myself
+```
+
+**Option 2 is the interesting one: it's a reel the user sent earlier and hasn't been
+planned this week.** Candidates are filtered on the same hard constraints the planner uses
+(it has to fit that window, and its advance prep has to be startable in time) and ranked so
+that a dish needing an ingredient the cart already failed on sorts last.
+
+**Answers come back through `webhook.py`,** which already receives that thread — a text
+message is routed to stage 5b instead of stage 1. Replies are matched on the quick-reply
+payload, then a single number anywhere in the message ("yes, 1"), then an exact label, then
+one unambiguous keyword. Anything that names two options, or none, gets a short "reply with
+just the number" rather than a guessed action: **acting on a misread reply would move a real
+evening in someone's real calendar.**
+
+Applying an answer is what makes this a loop rather than a notification. `later` re-plans
+the week without that window and rebuilds the shopping list; `swap` edits just that one
+`meal_plan` row, keeping the window the user deliberately chose, and rebuilds the list;
+`keep` changes nothing. Then the calendar is re-synced and **the new plan gets exactly the
+same feasibility check as the old one** — which can produce the next question.
+
+Three properties keep that safe:
+
+- **It terminates.** `FOLLOWUP_MAX_ROUNDS` bounds question → answer → re-plan. Past the
+  bound the agent stops asking, resolves the week deterministically, and says so.
+- **It doesn't nag.** An unanswered question for the same `kind` blocks a second one, so
+  re-running the pipeline never re-sends it. Asking a *new* question supersedes the old,
+  because answering a question about a plan that no longer exists is worse than silence.
+- **It degrades.** With no `INSTAGRAM_ACCESS_TOKEN` the question is printed and recorded as
+  `unreachable`, and the old deterministic re-plan runs immediately — the floor is the
+  behaviour this stage replaced, not a dead end.
+
+`python -m stages.followup --dry-run` decides and prints the DM without writing anything;
+`--reply "2"` acts as if that answer arrived; `--status` shows the week's conversation.
 
 ### 6 · `calendar_sync.py` — write the week
 Reads `meal_plan` + `recipes` + `instacart_orders`; writes Google Calendar, stores event
@@ -438,7 +511,8 @@ and a judge will ask which one we measured.
 
 The brief covers: architecture and why availability precedes planning · failure handling
 (retry wrapper, external wrapper, availability fallback, Instacart tiers, per-item
-isolation) · the measured numbers · and **known limitations stated plainly** — no
+isolation, the bounded follow-up loop) · the measured numbers · and **known limitations
+stated plainly** — no
 cross-dimension unit conversion, qualitative amounts approximated, free/busy can't tell
 "free" from "free but not at home", and the cart takes the first search result rather than
 comparing brands or sizes, so it optimizes *what* to buy rather than which product to buy.
@@ -450,6 +524,16 @@ per-step failure risk than REST, so stage 5 explicitly retries transient selecto
 failures, captures a screenshot on final item failure, reuses one authenticated session
 for the batch, and falls back to plain search links. Report browser-automation and
 fallback-link success separately using `instacart_orders.method`.
+
+**Follow-up loop note:** stage 5b is the strongest answer to *"is this an agent or a cron
+job?"*, so it's worth being precise about its limits. Meta only allows a business to send a
+DM inside 24 hours of the user's last message, so a question raised days after the last reel
+arrived will be rejected by the Send API — which lands in the `unreachable` path and
+deterministic re-plan, not in a crash. Replies are matched conservatively and an ambiguous
+answer is re-asked rather than guessed. And the loop is bounded: `followups.round` and
+`FOLLOWUP_MAX_ROUNDS` mean the worst case is three questions, not an infinite exchange.
+Quote `followups` directly in the brief — every row is one time the physical world said no,
+what was offered, what was chosen, and what the agent then did.
 
 ---
 
@@ -475,12 +559,15 @@ source of truth (see `DATABASE.md`). The shared layer is done and tested:
 | `lib/google_auth.py` | OAuth with one read+write scope; re-consents if a cached token is too narrow |
 | `web/views.py` | Page rendering as pure functions — testable without a browser |
 | `lib/ingest.py` | Reel payload parsing, caption-first local Whisper fallback, deduplicated pending-recipe write |
+| `lib/instagram.py` | Outbound DMs with quick replies, console fallback tier, reply parsing, `match_option()` |
 | `lib/source.py` | Transcript reliability score + caption/transcript SOURCE assembly for extraction |
-| `webhook.py` | FastAPI Meta verification + background Reel ingestion on port 8000 |
+| `lib/browser.py` | Browserbase session, overlay dismissal, failure screenshots, `with_retry()` |
+| `webhook.py` | FastAPI Meta verification + background Reel ingestion **and follow-up replies** on port 8000 |
 | `stages/extract.py` | Agent entrypoint: list/rank pending reels, extract caption±transcript into recipes |
 
 Stages built: **1** `stages/extract.py`, **2** `availability.py`, **3** `plan.py`,
-**4** `shopping_list.py`, **5** `instacart.py`, **6** `calendar_sync.py`, **7** `web/`.
+**4** `shopping_list.py`, **5** `instacart.py`, **5b** `followup.py`,
+**6** `calendar_sync.py`, **7** `web/`.
 `run_week.py` runs them in order. Seeds:
 `seed_pantry.py`, `seed_calendar.py`.
 
@@ -535,7 +622,8 @@ test captions and ground-truth labels · `run_eval.py`.
 `availability.py` · `plan.py` · `instacart.py` · `calendar_sync.py` · calendar seed ·
 `run_week.py`.
 
-**Stage 7, if it happens:** whoever is free first. It touches nothing else.
+**Stage 7:** `voiceover.py` is built and touches nothing else. The conversational cook
+session is still open — whoever is free first.
 
 The schema and the normalizer are **already settled and built** (see above) — everything
 downstream assumes them, so don't reimplement either. If you need a contract changed,
@@ -555,6 +643,12 @@ fill `BROWSERBASE_API_KEY` and `BROWSERBASE_PROJECT_ID`, run the one-time intera
 probe, then save its context id as `BROWSERBASE_CONTEXT_ID`; future runs reuse that
 logged-in browser context.
 
+For stage 5b's outbound DMs, generate an Instagram access token for the professional
+account the reels are sent to (Meta app → Instagram → *API setup with Instagram login*,
+scope `instagram_business_manage_messages`) and put it in `INSTAGRAM_ACCESS_TOKEN`. It is
+optional: without it the agent prints its question and re-plans on its own, which is the
+same code path as an expired token.
+
 ---
 
 ## 9. Timeline & cut list
@@ -570,8 +664,9 @@ logged-in browser context.
 
 Stage 7 has no slot in this timeline on purpose. It happens only if we're genuinely early.
 
-**Cut in this order:** audio transcription → stage 7 voice agent → the re-plan loop →
-Instacart browser automation (fall back to search links) → the `score_reason` LLM call.
+**Cut in this order:** audio transcription → the stage 7 conversational agent → the stage 5b
+DM loop (it degrades to the deterministic re-plan by removing one env var) → Instacart
+browser automation (fall back to search links) → the `score_reason` LLM call.
 
 **Never cut:** `run_eval.py`, the ground-truth labels, or the video. The 3:15 freeze holds
 regardless of what's unfinished — a working system with no video scores zero on two of
@@ -592,9 +687,16 @@ five criteria.
 
 The last 15 seconds carry 25% of the score. Don't trade them for more product footage.
 
-If the re-plan loop shipped, show it: *"delivery couldn't make Monday, so it moved that
-meal to Tuesday on its own."* If stage 7 shipped, end on it — tap the calendar link, the
-voice agent greets you by recipe name.
+**The re-plan loop shipped, so show it — it is the single beat that proves this is an agent
+and not a cron job.** Delivery can't make Monday, so the agent DMs you on Instagram with
+three options, you tap *"cook the vodka rigatoni that night instead"*, and the calendar
+rewrites itself while the video is still playing. Force it on camera by pushing
+`delivery_window_end` past the first cook slot and re-running stage 5b.
+
+The stage 7 voiceover gives the demo two possible closings. Narrate the 0:35–1:10 beat
+with the generated MP3 instead of a live voice — the system explaining its own reasoning
+is a stronger version of the same thirty seconds. Or end on the cook-along: tap the
+calendar link and hear it read the first step back to you.
 
 ---
 
@@ -615,9 +717,18 @@ python seed/seed_pantry.py && python seed/seed_calendar.py
 uvicorn webhook:app --host 0.0.0.0 --port 8000
 # in another terminal: ngrok http 8000
 # set NGROK_URL / WEBHOOK_URL in .env to the printed https URL, and use
-# {WEBHOOK_URL} as the Meta callback (verify token = META_VERIFY_TOKEN)
+# {WEBHOOK_URL} as the Meta callback (verify token = META_VERIFY_TOKEN).
+# Subscribe to the `messages` field: it delivers both reels and follow-up replies.
 python run_week.py --reels reels.txt
 ```
 
 For a caption-only demo, set `INGEST_TRANSCRIBE=false`; webhook ingestion remains
 functional. Local Whisper defaults to the `base` model via `WHISPER_MODEL`.
+
+To exercise the follow-up loop without the DM channel:
+
+```bash
+python -m stages.followup --dry-run       # what it would ask, and the options
+python -m stages.followup --reply "2"     # act as if you answered 2
+python -m stages.followup --status        # the week's conversation so far
+```

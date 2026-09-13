@@ -352,5 +352,44 @@ class WriteTests(unittest.TestCase):
         self.assertEqual(row["item_count"], 1)
 
 
+class StatusVocabulary(unittest.TestCase):
+    """Stage 5 writes these statuses; stage 5b reads them to find what to ask about.
+
+    A rename on one side and not the other wouldn't crash — the follow-up loop
+    would just silently stop noticing that ingredients are missing. So the
+    vocabulary is asserted rather than assumed.
+    """
+
+    def statuses_written(self, method):
+        result = {
+            "cart_url": "u",
+            "added": [item(1, "tomato")],
+            "failed": [item(2, "garlic")],
+            "method": method,
+        }
+        with (
+            patch.object(instacart, "_delivery_window", return_value=(None, None)),
+            patch.object(instacart, "log_eval"),
+            patch.object(instacart.db, "select", side_effect=fake_select([], None)),
+            patch.object(instacart.db, "delete_where"),
+            patch.object(instacart.db, "insert", return_value=[{}]),
+            patch.object(instacart.db, "update_where") as update,
+        ):
+            instacart._write_order(date(2026, 9, 14), result)
+        return [c.args[1]["resolution_status"] for c in update.call_args_list]
+
+    def test_browser_failures_read_as_unresolved_to_the_follow_up_loop(self):
+        added, failed = self.statuses_written("browser_automation")
+        self.assertEqual(added, config.CART_READY_STATUS)
+        self.assertIn(failed, config.UNRESOLVED_STATUSES)
+
+    def test_fallback_links_read_as_unresolved_to_the_follow_up_loop(self):
+        _added, failed = self.statuses_written("fallback_links")
+        self.assertIn(failed, config.UNRESOLVED_STATUSES)
+
+    def test_cart_ready_is_never_treated_as_unresolved(self):
+        self.assertNotIn(config.CART_READY_STATUS, config.UNRESOLVED_STATUSES)
+
+
 if __name__ == "__main__":
     unittest.main()

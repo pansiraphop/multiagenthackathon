@@ -1,6 +1,6 @@
 # Database
 
-Postgres on Supabase, 8 tables (README §3). **Prisma is the schema source of truth and
+Postgres on Supabase, 9 tables (README §3). **Prisma is the schema source of truth and
 nothing else** — there is no Prisma client, no JS. The Python app reads and writes at
 runtime through `supabase-py`, so every default and constraint lives in the database
 itself, not in an ORM layer.

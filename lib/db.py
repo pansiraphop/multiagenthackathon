@@ -94,6 +94,7 @@ def insert_recipe(
     raw_caption: str | None = None,
     raw_transcript: str | None = None,
     source_url: str | None = None,
+    sender_id: str | None = None,
     title: str | None = None,
     cuisine: str | None = None,
     est_time_minutes: int | None = None,
@@ -110,6 +111,8 @@ def insert_recipe(
         "raw_caption": raw_caption,
         "raw_transcript": raw_transcript,
         "source_url": source_url,
+        # Who to reply to when the week needs a decision (stage 5b).
+        "sender_id": sender_id,
         "title": title,
         "cuisine": cuisine,
         "est_time_minutes": est_time_minutes,
@@ -183,6 +186,28 @@ def successful_recipes() -> list[dict]:
     for r in rows:
         r["ingredients"] = r.pop("recipe_ingredients", [])
     return rows
+
+
+def latest_sender_id() -> str | None:
+    """Whoever most recently sent a reel — the person stage 5b messages back.
+
+    Falls back to the configured recipient so a demo on seeded reels (which
+    arrived before sender_id existed) can still hold a conversation.
+    """
+    rows = (
+        client()
+        .table("recipes")
+        .select("sender_id")
+        .not_.is_("sender_id", "null")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if rows and rows[0].get("sender_id"):
+        return str(rows[0]["sender_id"])
+    return config.INSTAGRAM_DM_RECIPIENT or None
 
 
 def pending_recipes() -> list[dict]:
