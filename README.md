@@ -100,7 +100,7 @@ stages depend on. Add whatever else you need.
 
 | Table | Key columns | Written by |
 |---|---|---|
-| `recipes` | `id`, `source_url`, `title`, `cuisine`, `est_time_minutes`, `servings`, `steps` (jsonb), `raw_caption`, `extraction_status` | 1 |
+| `recipes` | `id`, `source_url`, `title`, `cuisine`, `est_time_minutes`, `servings`, `steps` (jsonb), `raw_caption`, `extraction_status`, `provenance`, `source_sufficiency` | 1 |
 | `recipe_ingredients` | `recipe_id`, `name`, `quantity` *(nullable)*, `unit`, `qualitative_note` | 1 |
 | `pantry` | `ingredient_name`, `quantity`, `unit`, `expiry_date` | seed |
 | `cook_slots` | `week_start_date`, `slot_start`, `slot_end`, `duration_minutes`, `suitability_score`, `assigned` | 2 |
@@ -128,6 +128,46 @@ Extraction uses `client.messages.parse()` with a Pydantic model on `claude-opus-
 makes the JSON schema-valid at the API level. **So the retry loop is for semantic
 validation, not parsing** — unit outside the enum, negative quantity, empty steps. It also
 means "100% schema valid" is a vanity metric; see §7.
+
+#### Thin reels: reconstruct rather than fail
+
+Plenty of food reels are beauty shots with music and no actual recipe. Those must not
+hard-fail. **Reconstruction produces a synthetic caption, which then goes back through the
+same extractor** — one schema, one validator, one set of eval plumbing:
+
+```
+transcript ──▶ extract ──▶ recipe
+                  │
+                  └─ insufficient? ──▶ research (web search) ──▶ synthetic recipe text
+                                                                        │
+                                                                        └─▶ extract ──▶ recipe
+```
+
+- **Escalate on a deterministic rule, not a model opinion.** Pass 1 returns
+  `source_sufficiency` (`complete` / `partial` / `insufficient`); Python escalates when
+  that isn't `complete`, or ingredients < 3, or steps is empty. Keeping the branch in code
+  makes it reproducible and countable — *"4 of 6 reels had usable transcripts, 2 were
+  reconstructed"* only exists if the gate is deterministic.
+- **Use Anthropic's server-side web search** for the research call —
+  `{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}` on
+  `claude-opus-5`. No extra search API. Two gotchas: don't also declare
+  `code_execution` (that variant runs it internally, and a second execution environment
+  confuses the model), and server-tool errors come back as HTTP 200 with an error object
+  where a result list is expected — branch on it or you get a `TypeError` instead of a
+  clean fallback. Keep the research output free-form prose; the extractor handles
+  structure.
+- **Never reconstruct from nothing.** Reconstruction needs a dish identity from the
+  caption, hashtags, or on-screen title. With no usable text signal at all, set
+  `extraction_status = 'failed'` and log it. A plausible recipe with no relationship to
+  the reel is worse than a failure, and a reel of a curry producing a pasta dish is
+  exactly what a judge will catch.
+- **Label it.** `recipes.provenance` is `transcript` or `reconstructed`, and the calendar
+  description says so plainly (*"Reconstructed — this reel didn't include a recipe"*).
+  Visible honesty about it is a demo asset: it shows the system knows what it doesn't know.
+- **It splits the eval into two populations.** Ground-truth precision/recall only applies
+  to transcript-sufficient reels — there's nothing to compare a reconstruction against.
+  Score those on completeness instead (ingredients ≥ 3, steps ≥ 3, time in range) and
+  report the two groups separately, or both numbers become meaningless.
 
 ### 2 · `availability.py` — calendar → cook windows
 Reads Google Calendar free/busy for the week; writes `cook_slots`.

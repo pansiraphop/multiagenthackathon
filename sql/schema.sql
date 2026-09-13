@@ -15,6 +15,8 @@ CREATE TABLE "recipes" (
     "raw_caption" TEXT,
     "servings" INTEGER NOT NULL DEFAULT 2,
     "extraction_status" TEXT NOT NULL DEFAULT 'pending',
+    "provenance" TEXT NOT NULL DEFAULT 'transcript',
+    "source_sufficiency" TEXT,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
