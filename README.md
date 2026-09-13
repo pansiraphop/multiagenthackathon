@@ -248,11 +248,17 @@ amounts are already real numbers by this point, so they consolidate like any oth
 ### 5 · `instacart.py` — cart + delivery window
 Reads `shopping_list`; writes `instacart_orders`.
 
-**Tiered, and record which tier fired in `method`:** the Developer Platform shopping-list
-endpoint (takes plain ingredient names, returns a shoppable URL — no product-ID
-resolution needed), then Browserbase driving a real session if the API isn't usable, then
-plain `instacart.com` search links as a zero-dependency floor. The floor matters: stage 6
-always needs *some* URL to embed.
+The Instacart Developer Platform is not currently accepting new applications, so stage 5
+uses **two tiers, recorded in `method`**: Browserbase drives a real, persistent Instacart
+session and adds each ingredient to the cart; plain `instacart.com` search links are the
+zero-dependency floor. The floor matters: stage 6 always needs *some* URL to embed.
+
+Browser automation is isolated per item. Every selector wait has a timeout, a transient
+failure is retried once, and a final failure saves a screenshot under `failures/`, logs
+the ingredient, and continues. A browser-session or expired-login failure falls back to
+links for the whole list instead of dead-ending the pipeline. Run
+`python scripts/instacart_probe.py tomato` once to log in through Browserbase's live view,
+confirm the live selectors, and persist the resulting `BROWSERBASE_CONTEXT_ID`.
 
 Pick a delivery window that ends comfortably before the earliest cook slot. If nothing
 feasible exists, re-run `plan.py` excluding that slot so the meal moves later, and log the
@@ -349,6 +355,13 @@ isolation) · the measured numbers · and **known limitations stated plainly** �
 cross-dimension unit conversion, qualitative amounts approximated, free/busy can't tell
 "free" from "free but not at home". Naming the limits ourselves beats hoping nobody asks.
 
+**Instacart reliability note:** Browserbase was chosen because the formal Instacart API
+path was unavailable during the hackathon window. Browser action-taking has more
+per-step failure risk than REST, so stage 5 explicitly retries transient selector
+failures, captures a screenshot on final item failure, reuses one authenticated session
+for the batch, and falls back to plain search links. Report browser-automation and
+fallback-link success separately using `instacart_orders.method`.
+
 ---
 
 ## 8. Ownership
@@ -444,8 +457,10 @@ exists. Fifteen minutes of fake rows buys the whole afternoon.
 
 Google OAuth: request the single `https://www.googleapis.com/auth/calendar` scope so one
 consent covers both free/busy reads and event writes — `calendar.events` alone will 403 on
-reads. Verify a real free/busy call returns before writing planner code. Confirm what
-Instacart access actually exists early, since it decides which tier of stage 5 we build.
+reads. Verify a real free/busy call returns before writing planner code. For Instacart,
+fill `BROWSERBASE_API_KEY` and `BROWSERBASE_PROJECT_ID`, run the one-time interactive
+probe, then save its context id as `BROWSERBASE_CONTEXT_ID`; future runs reuse that
+logged-in browser context.
 
 ---
 
@@ -463,7 +478,7 @@ Instacart access actually exists early, since it decides which tier of stage 5 w
 Stage 7 has no slot in this timeline on purpose. It happens only if we're genuinely early.
 
 **Cut in this order:** audio transcription → stage 7 voice agent → the re-plan loop →
-Instacart tiers 1 and 2 (fall back to search links) → the `score_reason` LLM call.
+Instacart browser automation (fall back to search links) → the `score_reason` LLM call.
 
 **Never cut:** `run_eval.py`, the ground-truth labels, or the video. The 3:15 freeze holds
 regardless of what's unfinished — a working system with no video scores zero on two of
@@ -498,7 +513,10 @@ brew install python@3.11 # local Whisper/PyTorch does not yet support Python 3.1
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+playwright install chromium
 cp .env.example .env     # fill Supabase, META_VERIFY_TOKEN, NGROK_URL, and other credentials
+# fill Browserbase key/project, then log in once and save the printed context id:
+python scripts/instacart_probe.py tomato
 # apply the schema in the Supabase SQL editor
 python seed/seed_pantry.py && python seed/seed_calendar.py
 uvicorn webhook:app --host 0.0.0.0 --port 8000

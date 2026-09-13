@@ -44,6 +44,11 @@ GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 INSTACART_API_KEY = os.environ.get("INSTACART_API_KEY", "")
 INSTACART_API_BASE = os.environ.get("INSTACART_API_BASE", "https://connect.instacart.com")
+BROWSERBASE_API_KEY = os.environ.get("BROWSERBASE_API_KEY", "")
+BROWSERBASE_PROJECT_ID = os.environ.get("BROWSERBASE_PROJECT_ID", "")
+BROWSERBASE_CONTEXT_ID = os.environ.get("BROWSERBASE_CONTEXT_ID", "")
+INSTACART_ZIP = os.environ.get("INSTACART_ZIP", "")
+INSTACART_RETAILER = os.environ.get("INSTACART_RETAILER", "")
 
 APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8000")
 
@@ -76,6 +81,10 @@ DIVERSITY_PENALTY = 0.60      # multiplier when the cuisine is already used
 # --- delivery (stage 5) ----------------------------------------------------
 DELIVERY_LEAD_HOURS = 4       # earliest realistic turnaround from ordering
 DELIVERY_BUFFER_HRS = 2       # margin between delivery end and first cook slot
+BROWSER_SELECTOR_TIMEOUT_MS = 8000
+BROWSER_NAV_TIMEOUT_MS = 20000
+BROWSER_ITEM_RETRIES = 1
+FAILURE_SHOT_DIR = "failures"
 
 # --- normalization vocabulary ----------------------------------------------
 UNITS = ("g", "kg", "ml", "l", "cup", "tbsp", "tsp", "unit")
