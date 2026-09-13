@@ -173,3 +173,18 @@ def successful_recipes() -> list[dict]:
     for r in rows:
         r["ingredients"] = r.pop("recipe_ingredients", [])
     return rows
+
+
+def pending_recipes() -> list[dict]:
+    """Ingested reels waiting for stage 1 extraction (caption ± transcript)."""
+    rows = (
+        client()
+        .table("recipes")
+        .select("*")
+        .eq("extraction_status", "pending")
+        .order("created_at")
+        .execute()
+        .data
+        or []
+    )
+    return rows

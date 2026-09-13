@@ -131,21 +131,38 @@ built from it**, so don't regenerate those rows once the calendar has been writt
 ## 4. Stages
 
 ### 1 · `extract.py` — reel → structured recipe
-Reads a reel URL or pasted caption; writes `recipes` + `recipe_ingredients`.
+Reads a pending reel's caption (± transcript); writes structured fields onto the
+same `recipes` row and its `recipe_ingredients`.
 
 Instagram DMs enter through `webhook.py`. It acknowledges Meta immediately, then
 `lib/ingest.py` parses every `ig_reel` attachment in a background task. The attachment's
 `payload.title` is the primary caption. When `INGEST_TRANSCRIBE=true`, yt-dlp downloads
 the audio and local Whisper produces a best-effort transcript; download/transcription
 failure never discards a usable caption. Ingestion writes one deduplicated `recipes` row
-per `source_url` with `extraction_status = 'pending'`. Extraction consumes those rows,
-combining `raw_caption` and nullable `raw_transcript`, then marks each row `success` or
-`failed`. There is intentionally no users table or auth for the single-user demo.
+per `source_url` with `extraction_status = 'pending'`.
 
-Ingestion is tiered: `yt-dlp` metadata gives the caption without auth (most recipe reels
-put the full ingredient list there), audio transcription as a fallback for thin captions,
-pasted text as the guaranteed path. Log which tier fired — *"captions worked on 5/6 reels"*
-is a real brief line.
+**Transcript reliability is checked before extraction.** `lib/source.py` scores the
+Whisper text with deterministic heuristics (length, recipe cue words, overlap with the
+caption). Music-only reels that produce fluent junk are dropped (`tier=caption_only`).
+A usable voiceover is labeled and concatenated after the caption
+(`tier=caption_plus_transcript`); a thin caption with a strong transcript flips to
+`transcript_primary`. The agent picks which pending reel to process, then runs:
+
+```bash
+python -m stages.extract --list          # pending rows + reliability scores
+python -m stages.extract --best 1        # extract the top-ranked reel
+python -m stages.extract --id <uuid>     # extract one recipe
+python -m stages.extract --dry-run --best 1   # score + preview SOURCE, no LLM
+```
+
+Extraction consumes those rows' `raw_caption` + optional `raw_transcript`, then marks
+each row `success` or `failed`. There is intentionally no users table or auth for the
+single-user demo.
+
+Ingestion is tiered: webhook caption first, audio transcription as a fallback for thin
+captions, pasted text as the guaranteed path. Log which tier fired — *"captions worked
+on 5/6 reels; transcript accepted on 2/6"* is a real brief line.
+
 
 Extraction uses `client.messages.parse()` with a Pydantic model on `claude-opus-5`, which
 makes the JSON schema-valid at the API level. **So the retry loop is for semantic
@@ -354,13 +371,17 @@ source of truth (see `DATABASE.md`). The shared layer is done and tested:
 | `lib/evals.py` | `log_eval()`, `timed()` context manager, `eval_report()`, `format_report()` |
 | `lib/external.py` | `call_external_api()` — returns `(result, ok)`, never raises |
 | `lib/google_auth.py` | OAuth with one read+write scope; re-consents if a cached token is too narrow |
-
-Stages built: **1** (co-dev), **2** `availability.py`, **3** `plan.py`. Seeds:
-`seed_pantry.py`, `seed_calendar.py`. 117 unit tests across `tests/`.
 | `lib/ingest.py` | Reel payload parsing, caption-first local Whisper fallback, deduplicated pending-recipe write |
+| `lib/source.py` | Transcript reliability score + caption/transcript SOURCE assembly for extraction |
 | `webhook.py` | FastAPI Meta verification + background Reel ingestion on port 8000 |
+| `stages/extract.py` | Agent entrypoint: list/rank pending reels, extract caption±transcript into recipes |
 
-Run `python -m lib.normalize` and `python -m lib.schemas` to execute their self-tests.
+Stages built: **1** `stages/extract.py`, **2** `availability.py`, **3** `plan.py`. Seeds:
+`seed_pantry.py`, `seed_calendar.py`.
+
+Run `python -m lib.normalize`, `python -m lib.schemas`, and `python -m lib.source` for
+self-tests.
+
 
 ### Tests
 
@@ -368,6 +389,9 @@ Run `python -m lib.normalize` and `python -m lib.schemas` to execute their self-
 python -m unittest discover -s tests -t .   # all unit suites, no network, <1s
 python -m lib.normalize                     # normalizer self-tests
 python -m lib.schemas                       # schema + validator self-tests
+python -m lib.source                        # transcript reliability self-tests
+python -m stages.extract --list             # pending reels + reliability (needs Supabase)
+python -m stages.extract --best 1           # LIVE extraction of top pending reel
 python -m tests.test_pipeline               # LIVE integration, stages 1+2
 python -m tests.test_pipeline --keep        # ...and leave the rows for the planner
 ```
@@ -398,7 +422,7 @@ than failing outright.
 being planned. Not the Monday of the current week: running on a Sunday would otherwise
 schedule everything six days in the past.
 
-**Path A — ingestion, pantry, eval.** `extract.py` · `shopping_list.py` · pantry seed ·
+**Path A — ingestion, pantry, eval.** `stages/extract.py` · `shopping_list.py` · pantry seed ·
 test captions and ground-truth labels · `run_eval.py`.
 
 **Path B — calendar, planner, instacart.** Google OAuth · the external-API wrapper ·
