@@ -274,6 +274,10 @@ def cook_page(meal: dict, order: dict | None, voice: dict) -> str:
   </div>
 
   <div class="shell">
+    <aside class="rail">
+      {cook_panel}
+      {_shop_panel(order)}
+    </aside>
     <main>
       {reason}
       {''.join(notices)}
@@ -292,10 +296,7 @@ def cook_page(meal: dict, order: dict | None, voice: dict) -> str:
 
       <p class="tiny muted" style="margin-top:26px">{reel}</p>
     </main>
-    <aside class="rail">
-      {cook_panel}
-      {_shop_panel(order)}
-    </aside>
+  
   </div>
   <div class="bar-spacer"></div>
 """
@@ -307,7 +308,7 @@ def cook_page(meal: dict, order: dict | None, voice: dict) -> str:
 
     bar = f"""
 <div class="bar"><div class="inner">
-  <button class="btn" type="button" id="voice-mobile" data-guide-start>Start guided cooking</button>
+  <button class="btn" type="button" id="voice-mobile" data-guide-start hidden>Start guided cooking</button>
   {secondary}
 </div></div>
 <script id="cook-context" type="application/json">{json.dumps(voice)}</script>"""

@@ -394,7 +394,7 @@ input:focus-visible, select:focus-visible {
 
 /* --- sticky mobile bar --------------------------------------------------- */
 
-.bar-spacer { height: 96px; }
+.bar-spacer { height: 84px; }
 .bar {
   position: fixed; inset: auto 0 0 0; z-index: 30;
   background: rgb(255 255 255 / 92%);
@@ -405,8 +405,10 @@ input:focus-visible, select:focus-visible {
 }
 .bar .inner {
   max-width: var(--page); margin: 0 auto; padding-inline: var(--gutter);
-  display: grid; grid-template-columns: 1fr 1fr; gap: 9px;
+  display: flex; gap: 9px;
 }
+.bar .inner > * { flex: 1; }
+.bar .inner > [hidden] { display: none; }
 .bar .note { grid-column: 1/-1; font-size: 0.75rem; color: var(--ink-3);
              text-align: center; margin: 1px 0 0; }
 
@@ -418,7 +420,12 @@ input:focus-visible, select:focus-visible {
 }
 .wrap { padding-bottom: 56px; }
 
-.shell { display: grid; grid-template-columns: minmax(0, 1fr); gap: 26px; }
+.shell { display: grid; grid-template-columns: minmax(0, 1fr); gap: 22px; }
+
+/* The rail comes first in the DOM, so on mobile the actions are the first
+   thing you reach — by thumb or by keyboard — and the guide panel is where
+   you're looking when you tap Start. Desktop moves it back to the right. */
+.rail { display: grid; gap: 12px; }
 
 /* ===========================================================================
    DESKTOP — not the mobile layout stretched.
@@ -434,10 +441,60 @@ input:focus-visible, select:focus-visible {
 
 @media (min-width: 64rem) {
   .shell { grid-template-columns: minmax(0, 1fr) 19rem; gap: 44px; align-items: start; }
-  .rail { position: sticky; top: 78px; }
+  .rail { order: 1; position: sticky; top: 78px; }
   .bar, .bar-spacer { display: none; }
   .meals { grid-template-columns: 1fr; }
   .wrap { padding-block: 40px 0; }
 }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+
+/* ===========================================================================
+   MOBILE REFINEMENTS
+   Read one-handed, at arm's length, mid-task. Bigger targets and bigger
+   guide text; everything else tightens to keep the useful part on screen.
+   =========================================================================== */
+
+@media (max-width: 47.99rem) {
+  .wrap { padding-block: 20px 0; }
+
+  h1 { letter-spacing: -0.028em; }
+
+  /* The header is the least useful thing on a phone once you're cooking. */
+  .rhead { padding-bottom: 14px; }
+  .rhead .meta { margin-top: 7px; }
+
+  /* The panel holding Start guided cooking is the first thing you see. */
+  .rail .panel { padding: 14px; }
+
+  /* Spoken step text: large, high contrast, comfortable line length. */
+  .guide-text { font-size: 1.0625rem; line-height: 1.5; }
+  .guide .btn-row { grid-template-columns: 1fr 1fr; display: grid; gap: 9px; }
+
+  /* Checking things off with a thumb, possibly with wet hands. */
+  .check { min-height: 52px; }
+  .box { width: 20px; height: 20px; }
+  .check .label { font-size: 1rem; }
+
+  .steps li { padding: 15px 0; gap: 13px; }
+  .step-text { font-size: 1rem; }
+  .steps li::before { flex-basis: 26px; height: 26px; line-height: 24px; }
+
+  /* Section rules earn their space at this width. */
+  .section-head { margin-top: 26px; }
+
+  .stats div { padding: 11px 12px; }
+  .stats b { font-size: 1.25rem; }
+
+  /* Meal rows: the date block stays, everything else gives up width. */
+  .meal { gap: 13px; padding: 14px 0; }
+  .meal:hover { padding-inline: 0; background: none; }
+  .when { flex-basis: 48px; }
+}
+
+/* Very narrow phones: stop the metadata row from pushing the title. */
+@media (max-width: 22rem) {
+  :root { --gutter: 16px; }
+  .meta { font-size: 0.75rem; }
+}
