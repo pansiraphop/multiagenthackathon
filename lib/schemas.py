@@ -29,14 +29,23 @@ class Ingredient(BaseModel):
     )
     quantity: float | None = Field(
         default=None,
-        description="Numeric amount, or null when the source gives a qualitative "
-                    "amount. Never invent a number.",
+        description="Numeric amount, ALWAYS filled in. When the source gives a "
+                    "qualitative amount ('a good glug'), estimate a sensible "
+                    "number for this specific ingredient and set is_approximate "
+                    "true. Null only if there is genuinely nothing to estimate "
+                    "from.",
     )
     unit: Unit = Field(description="One of the fixed units. Countable items use 'unit'.")
+    is_approximate: bool = Field(
+        default=False,
+        description="True when quantity is your estimate of a qualitative amount "
+                    "or a range, rather than a number the source stated. The cook "
+                    "sees this as '~2 tbsp (a good glug)'.",
+    )
     qualitative_note: str | None = Field(
         default=None,
-        description="Required when quantity is null: the source's own phrasing, "
-                    "e.g. 'a good glug', 'to taste', 'a handful'.",
+        description="Required whenever is_approximate is true: the source's own "
+                    "phrasing, e.g. 'a good glug', 'to taste', 'a handful'.",
     )
 
 
@@ -104,18 +113,40 @@ def validate_recipe(r: ExtractedRecipe) -> list[str]:
     if not r.title.strip():
         problems.append("title is empty")
 
+    seen: set[str] = set()
     for ing in r.ingredients:
         if not ing.name.strip():
             problems.append("an ingredient has an empty name")
             continue
+
+        key = ing.name.strip().lower()
+        if key in seen:
+            problems.append(f"{ing.name}: listed twice; combine into one entry")
+        seen.add(key)
+
         if ing.quantity is not None and ing.quantity <= 0:
             problems.append(
-                f"{ing.name}: quantity is {ing.quantity}; use a positive number "
-                f"or null with a qualitative_note"
+                f"{ing.name}: quantity is {ing.quantity}; give a positive estimate "
+                f"with is_approximate true"
             )
-        if ing.quantity is None and not ing.qualitative_note:
+        if ing.quantity is None:
             problems.append(
-                f"{ing.name}: quantity is null, so qualitative_note is required"
+                f"{ing.name}: quantity is null. Estimate a usable amount for this "
+                f"ingredient and set is_approximate true — a cook at the stove "
+                f"cannot act on a missing amount"
+            )
+        if ing.is_approximate and not ing.qualitative_note:
+            problems.append(
+                f"{ing.name}: is_approximate is true, so qualitative_note must "
+                f"hold the source's phrasing"
+            )
+        # A number the source never stated must be labelled, or the cook can't
+        # tell an estimate from a measurement.
+        if (ing.quantity is not None and not ing.is_approximate
+                and ing.qualitative_note):
+            problems.append(
+                f"{ing.name}: has a qualitative_note but is_approximate is false; "
+                f"set it true so the amount is shown as an estimate"
             )
 
     return problems
@@ -144,8 +175,10 @@ if __name__ == "__main__":
         ingredients=[
             Ingredient(name="spinach", quantity=400, unit="g"),
             Ingredient(name="paneer", quantity=200, unit="g"),
-            Ingredient(name="olive oil", quantity=None, unit="unit",
-                       qualitative_note="a good glug"),
+            # A qualitative amount, estimated and labelled — the shape we now
+            # want, because a cook can act on "~2 tbsp".
+            Ingredient(name="olive oil", quantity=2, unit="tbsp",
+                       is_approximate=True, qualitative_note="a good glug"),
         ],
         source_sufficiency="complete",
     )
@@ -157,11 +190,35 @@ if __name__ == "__main__":
     assert any("est_time_minutes" in p for p in problems)
     assert any("steps is empty" in p for p in problems)
 
-    # Null quantity without a note is the silent-corruption case.
+    # A null quantity is now itself the problem: it's unusable at the stove.
     nullq = good.model_copy(update={
         "ingredients": [Ingredient(name="salt", quantity=None, unit="tsp")]
     })
-    assert any("qualitative_note is required" in p for p in validate_recipe(nullq))
+    assert any("quantity is null" in p for p in validate_recipe(nullq))
+
+    # An estimate must carry the source's phrasing...
+    unlabelled = good.model_copy(update={
+        "ingredients": [Ingredient(name="olive oil", quantity=2, unit="tbsp",
+                                   is_approximate=True)]
+    })
+    assert any("qualitative_note must" in p for p in validate_recipe(unlabelled))
+
+    # ...and a number derived from a qualitative phrase must be flagged, or the
+    # cook can't tell an estimate from a measurement.
+    unflagged = good.model_copy(update={
+        "ingredients": [Ingredient(name="olive oil", quantity=2, unit="tbsp",
+                                   qualitative_note="a good glug")]
+    })
+    assert any("set it true" in p for p in validate_recipe(unflagged))
+
+    # Duplicates would become two shopping rows and a constraint violation.
+    dupes = good.model_copy(update={
+        "ingredients": [
+            Ingredient(name="olive oil", quantity=1, unit="tbsp"),
+            Ingredient(name="Olive Oil", quantity=2, unit="tbsp"),
+        ]
+    })
+    assert any("listed twice" in p for p in validate_recipe(dupes))
 
     # Gate
     assert needs_reconstruction(good.model_copy(update={"source_sufficiency": "partial"}))

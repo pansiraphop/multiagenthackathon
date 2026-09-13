@@ -29,6 +29,7 @@ CREATE TABLE "recipe_ingredients" (
     "recipe_id" UUID NOT NULL,
     "name" TEXT NOT NULL,
     "quantity" DECIMAL(10,2),
+    "is_approximate" BOOLEAN NOT NULL DEFAULT false,
     "unit" TEXT,
     "qualitative_note" TEXT,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,

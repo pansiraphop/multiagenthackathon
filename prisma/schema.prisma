@@ -77,6 +77,11 @@ model RecipeIngredient {
   recipe_id String   @db.Uuid
   name      String
   quantity  Decimal? @db.Decimal(10, 2)
+
+  // True when `quantity` is an approximation of a qualitative amount
+  // ("a good glug" -> 2 tbsp). Rendered to the cook as "~2 tbsp (a good glug)"
+  // so the number is usable without being mistaken for a stated measurement.
+  is_approximate Boolean @default(false)
   unit      String?
   qualitative_note String?
 

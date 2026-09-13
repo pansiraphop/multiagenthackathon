@@ -11,27 +11,70 @@ EXTRACTION_SYSTEM = (
 EXTRACTION_PROMPT = """\
 Extract a structured recipe from this Instagram Reel caption or transcript.
 
-Rules:
-- Ingredient names: lowercase, singular, no descriptors or amounts. "2 large ripe
-  Tomatoes, diced" -> name "tomato". Preparation belongs in the steps, never in
-  the name.
-- If an amount is qualitative ("a good glug", "to taste", "a handful"), set
-  quantity to null and record the source's phrasing in qualitative_note. Never
-  invent a number. A wrong number silently corrupts the shopping list; a null
-  does not.
-- est_time_minutes is active cooking time. Exclude marinating, chilling and
-  resting.
-- steps: one action per step, imperative, in order. Drop engagement filler
-  ("follow for more", "save this", "link in bio"). If the source lists no
-  method, infer the minimal sequence the ingredients imply.
+## Ingredient names
+- Lowercase, singular, no descriptors or amounts. "2 large ripe Tomatoes, diced"
+  -> name "tomato". Preparation belongs in the steps, never in the name.
+- Split combined lines into separate ingredients. "salt and pepper to taste"
+  becomes two entries. "olive oil or butter" becomes one entry for the first
+  option.
+- Translate non-English ingredient names to English, keeping widely-used terms
+  as they are ("gochujang", "tahini", "miso").
+- Never list the same ingredient twice. If it appears in two places (a marinade
+  and the pan), combine into a single entry with the total amount.
+
+## Amounts — always give a usable number
+Every ingredient needs an amount a cook can act on. Someone is standing at a
+stove reading this; "olive oil: unspecified" is useless to them.
+
+- When the source states an amount, use it exactly and leave is_approximate
+  false.
+- When the source is qualitative, **estimate a sensible number for that
+  specific ingredient**, set is_approximate true, and put the source's own
+  words in qualitative_note. The cook sees "~2 tbsp (a good glug)", so your
+  estimate is useful without being mistaken for a measurement.
+- Use the ingredient to judge the estimate. A handful of parsley is not a
+  handful of almonds. These are starting points, not rules:
+
+  | Source says | Typical estimate |
+  |---|---|
+  | a glug / drizzle / splash of oil | 1 tbsp |
+  | a good or generous glug | 2 tbsp |
+  | a knob of butter | 1 tbsp |
+  | a pinch | 1/4 tsp |
+  | a dash | 1/4 tsp |
+  | salt/pepper "to taste" | 1/2 tsp |
+  | a handful of herbs | 1/4 cup |
+  | a handful of nuts | 40 g |
+  | a squeeze of lemon | 1 tbsp |
+  | a few sprigs | 2 unit |
+  | a bunch of herbs | 1 unit |
+
+- Convert imperial and volumetric units to the allowed set: ounces and pounds
+  to g, fluid ounces and pints to ml, a stick of butter to 113 g.
+- For a range ("2-3 cloves"), use the midpoint and set is_approximate true.
+- Only use null if there is genuinely nothing to estimate from.
+
+## Steps
+- One action per step, imperative, in order.
+- Drop engagement filler: "follow for more", "save this", "link in bio",
+  "comment RECIPE".
+- If the source lists no method, infer the minimal sequence the ingredients
+  imply.
+
+## Other fields
+- est_time_minutes is ACTIVE cooking time. Exclude marinating, chilling,
+  resting and rising.
+- If the source contains more than one recipe, extract only the main one — the
+  dish the reel is actually about.
 - Include every edible ingredient, salt, oil and water included when called for.
 - source_sufficiency is your honest read on the SOURCE, not on your output:
   - "complete"     — the source specified both ingredients and method
   - "partial"      — the source named some ingredients but left real gaps
   - "insufficient" — the source barely described the dish; you would be writing
                      the recipe from your own knowledge
-  Judge the source. Do not mark it complete because you are able to fill in the
-  gaps yourself.
+  Judge the source. Do not mark it complete because you can fill the gaps
+  yourself. Estimating a glug does not make a source incomplete — that is
+  normal recipe language. Inventing half the ingredient list does.
 
 SOURCE:
 {source_text}

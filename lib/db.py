@@ -88,9 +88,11 @@ def insert_recipe(
 
 
 def insert_ingredients(recipe_id: str, ingredients: list[dict[str, Any]]) -> list[dict]:
-    """Insert recipe_ingredients. Callers MUST have normalized names already.
+    """Insert recipe_ingredients.
 
-    Each dict: {name, quantity (may be None), unit, qualitative_note (optional)}.
+    Pass rows built by `normalize.to_ingredient_row()` — it guarantees the
+    normalized name, a usable quantity, a canonical unit and the
+    is_approximate flag. Anything else risks the silent pantry-mismatch bug.
     """
     rows = [
         {
@@ -99,10 +101,12 @@ def insert_ingredients(recipe_id: str, ingredients: list[dict[str, Any]]) -> lis
             "quantity": ing.get("quantity"),
             "unit": ing.get("unit"),
             "qualitative_note": ing.get("qualitative_note"),
+            "is_approximate": bool(ing.get("is_approximate", False)),
         }
         for ing in ingredients
+        if ing.get("name")
     ]
-    return insert("recipe_ingredients", rows)
+    return insert("recipe_ingredients", rows) if rows else []
 
 
 def get_recipe(recipe_id: str) -> dict | None:

@@ -63,15 +63,21 @@ interesting thing the system does.
 Short list. Each one prevents a silently wrong answer rather than a crash, which is why
 they're worth agreeing on up front.
 
-1. **One `normalize_ingredient()` helper, imported by both paths.** Lowercase, singular,
-   units from a fixed enum. If the pantry says `tomato` and a recipe says `Tomatoes`,
-   nothing matches and the shopping list is quietly wrong. This is the single most likely
-   source of silent bugs in the whole project.
+1. **One normalization helper, imported by both paths** — build every ingredient row with
+   `normalize.to_ingredient_row()`. Lowercase, singular, units from a fixed enum. If the
+   pantry says `tomato` and a recipe says `Tomatoes`, nothing matches and the shopping
+   list is quietly wrong. This is the single most likely source of silent bugs in the
+   whole project.
 2. **Every datetime is timezone-aware.** `timestamptz` in Postgres, explicit `timeZone`
    on every Calendar write. Free/busy returns UTC; a naive datetime puts every meal at
    2 AM and there's no time to debug that at 3 PM.
-3. **Ingredient quantity is nullable, and null means qualitative.** "A good glug of olive
-   oil" has no correct number. Never invent one to satisfy a schema.
+3. **Every ingredient gets a usable amount, and estimates are labelled.** "A good glug of
+   olive oil" has no exact number, but someone is standing at a stove reading this — a
+   null is useless to them. So the model estimates for that specific ingredient (a
+   handful of parsley is not a handful of almonds), sets `is_approximate`, and keeps the
+   source's own words in `qualitative_note`. `render_amount()` shows it as
+   `~2 tbsp (a good glug)`. The rule is not "never invent a number" — it's **never invent
+   one silently.**
 4. **Units are compared, never converted across dimensions.** Cups↔grams is
    ingredient-specific and unsolvable in general. On a mismatch, buy the full amount and
    say so in the brief.
@@ -101,7 +107,7 @@ stages depend on. Add whatever else you need.
 | Table | Key columns | Written by |
 |---|---|---|
 | `recipes` | `id`, `source_url`, `title`, `cuisine`, `est_time_minutes`, `servings`, `steps` (jsonb), `raw_caption`, `extraction_status`, `provenance`, `source_sufficiency` | 1 |
-| `recipe_ingredients` | `recipe_id`, `name`, `quantity` *(nullable)*, `unit`, `qualitative_note` | 1 |
+| `recipe_ingredients` | `recipe_id`, `name`, `quantity`, `unit`, `is_approximate`, `qualitative_note` | 1 |
 | `pantry` | `ingredient_name`, `quantity`, `unit`, `expiry_date` | seed |
 | `cook_slots` | `week_start_date`, `slot_start`, `slot_end`, `duration_minutes`, `suitability_score`, `assigned` | 2 |
 | `meal_plan` | `id`, `recipe_id`, `cook_slot_id`, `week_start_date`, `planned_start_time`, `planned_end_time`, `score`, `score_reason`, `calendar_event_id`, `status` | 3, 6 |
@@ -199,8 +205,9 @@ Should accept an "exclude this slot" flag, for the re-plan case in stage 5.
 Reads `meal_plan`, `recipe_ingredients`, `pantry`; writes `shopping_list`.
 
 Sum requirements across the week, group by normalized name + unit, subtract pantry stock
-only when units match exactly (ground rule 4). Qualitative-quantity items become one
-generic unit if absent and are skipped if present — don't order 1g of salt.
+only when units match exactly (ground rule 4). Filter out `is_non_food()` rows — water,
+pasta water and ice are real recipe ingredients but must never reach a cart. Approximated
+amounts are already real numbers by this point, so they consolidate like any other.
 
 ### 5 · `instacart.py` — cart + delivery window
 Reads `shopping_list`; writes `instacart_orders`.
@@ -221,8 +228,9 @@ Reads `meal_plan` + `recipes` + `instacart_orders`; writes Google Calendar, stor
 ids back.
 
 One event per meal at its real cook time. Description carries `score_reason`, ingredients
-(rendering qualitative amounts honestly — `olive oil — a good glug`), numbered steps, the
-cart URL, the reel link, and **the cook-session URL from §6**. Plus one event for the
+rendered with `render_amount()` so estimates read as `olive oil — ~2 tbsp (a good glug)`,
+numbered steps, the cart URL, the reel link, and **the cook-session URL from §6**. If the
+recipe was reconstructed, say so in the description. Plus one event for the
 delivery window. Explicit `timeZone`, skip rows that already have an event id.
 
 ---
@@ -317,7 +325,7 @@ source of truth (see `DATABASE.md`). The shared layer is done and tested:
 | Module | What's in it |
 |---|---|
 | `config.py` | Every tunable, credentials, `TIMEZONE`, `week_start()`, `now_local()` |
-| `lib/normalize.py` | `normalize_ingredient()` / `normalize_name()` / `normalize_unit()`, 22 self-tests |
+| `lib/normalize.py` | `to_ingredient_row()` (the write path), `parse_quantity()`, `normalize_measure()`, `render_amount()`, `dedupe_ingredients()`, `is_non_food()`, `clean_source_text()`. ~80 self-tests |
 | `lib/db.py` | Supabase client, `insert_recipe()`, `insert_ingredients()`, `successful_recipes()`, `delete_where()` |
 | `lib/llm.py` | `call_llm_structured()` (retry + semantic validation) and `call_llm_with_search()` |
 | `lib/schemas.py` | `ExtractedRecipe`, `Ingredient`, `DishIdentification`, `validate_recipe()`, `needs_reconstruction()` |
@@ -326,6 +334,18 @@ source of truth (see `DATABASE.md`). The shared layer is done and tested:
 | `lib/external.py` | `call_external_api()` — returns `(result, ok)`, never raises |
 
 Run `python -m lib.normalize` and `python -m lib.schemas` to execute their self-tests.
+
+**Build every ingredient row with `to_ingredient_row()`** — it is the only thing that
+guarantees all of the invariants at once. Verified against real reel captions, it handles
+unicode and mixed fractions (`1½`, `½`), ranges (`2-3` → 2.5, flagged approximate),
+imperial conversion (`8 oz` → 227 g, `1 stick` → 113 g, `1½ lbs` → 680 g), measure words
+stuck in names (`3 cloves garlic` → `garlic`), qualitative estimates, and duplicate lines.
+`dedupe_ingredients()` then merges repeats, and `is_non_food()` keeps pasta water and ice
+out of the shopping list while leaving them in the recipe.
+
+Imperial conversion matters more than it looks: without it `8 oz` normalizes to
+`8 unit` — the number survives but means something entirely different, which is worse
+than failing outright.
 
 `week_start()` returns the **upcoming** Monday (or today, if today is Monday) — the week
 being planned. Not the Monday of the current week: running on a Sunday would otherwise
