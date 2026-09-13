@@ -44,6 +44,7 @@ model Recipe {
   est_time_minutes Int?
   steps            Json?   @db.JsonB
   raw_caption      String?
+  raw_transcript   String?
 
   servings          Int    @default(2)
   extraction_status String @default("pending")

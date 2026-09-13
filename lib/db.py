@@ -61,6 +61,7 @@ def delete_where(table: str, **eq) -> None:
 def insert_recipe(
     *,
     raw_caption: str | None = None,
+    raw_transcript: str | None = None,
     source_url: str | None = None,
     title: str | None = None,
     cuisine: str | None = None,
@@ -74,6 +75,7 @@ def insert_recipe(
     """Insert a recipes row. id, created_at and updated_at default server-side."""
     row = {
         "raw_caption": raw_caption,
+        "raw_transcript": raw_transcript,
         "source_url": source_url,
         "title": title,
         "cuisine": cuisine,

@@ -106,7 +106,7 @@ stages depend on. Add whatever else you need.
 
 | Table | Key columns | Written by |
 |---|---|---|
-| `recipes` | `id`, `source_url`, `title`, `cuisine`, `est_time_minutes`, `servings`, `steps` (jsonb), `raw_caption`, `extraction_status`, `provenance`, `source_sufficiency` | 1 |
+| `recipes` | `id`, `source_url`, `title`, `cuisine`, `est_time_minutes`, `servings`, `steps` (jsonb), `raw_caption`, `raw_transcript`, `extraction_status`, `provenance`, `source_sufficiency` | 1 |
 | `recipe_ingredients` | `recipe_id`, `name`, `quantity`, `unit`, `is_approximate`, `qualitative_note` | 1 |
 | `pantry` | `ingredient_name`, `quantity`, `unit`, `expiry_date` | seed |
 | `cook_slots` | `week_start_date`, `slot_start`, `slot_end`, `duration_minutes`, `suitability_score`, `assigned` | 2 |

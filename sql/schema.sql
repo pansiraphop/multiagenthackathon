@@ -13,6 +13,7 @@ CREATE TABLE "recipes" (
     "est_time_minutes" INTEGER,
     "steps" JSONB,
     "raw_caption" TEXT,
+    "raw_transcript" TEXT,
     "servings" INTEGER NOT NULL DEFAULT 2,
     "extraction_status" TEXT NOT NULL DEFAULT 'pending',
     "provenance" TEXT NOT NULL DEFAULT 'transcript',
