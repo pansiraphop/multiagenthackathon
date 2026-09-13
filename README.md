@@ -309,9 +309,30 @@ cross-dimension unit conversion, qualitative amounts approximated, free/busy can
 
 Stages talk only through the database, so both paths proceed independently.
 
-**Path A — ingestion, pantry, eval.** Schema/DDL · `normalize_ingredient` · the LLM
-wrapper · eval logging · `extract.py` · `shopping_list.py` · pantry seed · test captions
-and ground-truth labels · `run_eval.py`.
+### Already built — import these, don't rewrite them
+
+The schema is **live in Supabase**; `sql/schema.sql` and `prisma/schema.prisma` are the
+source of truth (see `DATABASE.md`). The shared layer is done and tested:
+
+| Module | What's in it |
+|---|---|
+| `config.py` | Every tunable, credentials, `TIMEZONE`, `week_start()`, `now_local()` |
+| `lib/normalize.py` | `normalize_ingredient()` / `normalize_name()` / `normalize_unit()`, 22 self-tests |
+| `lib/db.py` | Supabase client, `insert_recipe()`, `insert_ingredients()`, `successful_recipes()`, `delete_where()` |
+| `lib/llm.py` | `call_llm_structured()` (retry + semantic validation) and `call_llm_with_search()` |
+| `lib/schemas.py` | `ExtractedRecipe`, `Ingredient`, `DishIdentification`, `validate_recipe()`, `needs_reconstruction()` |
+| `lib/prompts.py` | Extraction, dish identification, reconstruction, and `score_reason` prompts |
+| `lib/evals.py` | `log_eval()`, `timed()` context manager, `eval_report()`, `format_report()` |
+| `lib/external.py` | `call_external_api()` — returns `(result, ok)`, never raises |
+
+Run `python -m lib.normalize` and `python -m lib.schemas` to execute their self-tests.
+
+`week_start()` returns the **upcoming** Monday (or today, if today is Monday) — the week
+being planned. Not the Monday of the current week: running on a Sunday would otherwise
+schedule everything six days in the past.
+
+**Path A — ingestion, pantry, eval.** `extract.py` · `shopping_list.py` · pantry seed ·
+test captions and ground-truth labels · `run_eval.py`.
 
 **Path B — calendar, planner, instacart.** Google OAuth · the external-API wrapper ·
 `availability.py` · `plan.py` · `instacart.py` · `calendar_sync.py` · calendar seed ·
