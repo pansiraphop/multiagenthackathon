@@ -1,4 +1,4 @@
-"""Integration test — stages 1 to 3 together, against live services.
+"""Integration test — stages 1 to 4 together, against live services.
 
 Unlike the unit suites this costs real API calls and writes real rows, so it
 is never picked up by `unittest discover`. Run it deliberately:
@@ -25,6 +25,7 @@ import config
 from lib import db
 from lib.evals import format_report
 from lib.normalize import (
+    is_non_food as _is_non_food,
     clean_source_text,
     dedupe_ingredients,
     is_non_food,
@@ -32,7 +33,7 @@ from lib.normalize import (
     to_ingredient_row,
 )
 from lib.schemas import advance_prep, attended_minutes
-from stages import availability, extract, plan
+from stages import availability, extract, plan, shopping_list
 from seed import seed_pantry
 
 INPUT_REF = "integration-test"
@@ -225,8 +226,17 @@ def check_plan_invariants(meals: list[dict], slots: list[dict],
     print("[2+3] plan invariants")
 
     by_slot = {s["id"]: s for s in slots}
-    by_recipe = {r["id"]: r for r in recipes}
+    # The planner works across EVERY successful recipe, not just the ones this
+    # test inserted — real ingested reels are in the pool too. Load them all,
+    # or the invariant check trips over a meal it doesn't recognise.
+    all_recipes = db.successful_recipes()
+    by_recipe = {r["id"]: r for r in all_recipes}
     pantry = plan.usable_pantry()
+
+    for row in meals:
+        if row["recipe_id"] not in by_recipe:
+            fail(f"meal references recipe {row['recipe_id']} which is not in "
+                 f"successful_recipes()")
 
     seen_slots, seen_recipes = set(), set()
     for row in meals:
@@ -288,6 +298,65 @@ def check_plan_invariants(meals: list[dict], slots: list[dict],
     stages_logged = {row["stage"] for row in db.select("eval_log")}
     if "planning" not in stages_logged:
         fail("eval_log has no 'planning' rows")
+
+
+def run_stage_4() -> list[dict]:
+    rows = shopping_list.run()
+    if not rows:
+        fail("shopping list is empty - every planned ingredient can't already "
+             "be in the pantry")
+    return rows
+
+
+def check_shopping_invariants(items: list[dict], meals: list[dict],
+                              recipes: list[dict]) -> None:
+    """What stage 5 will pick up has to be buyable and unambiguous."""
+    print("[3+4] shopping invariants")
+
+    by_recipe = {r["id"]: r for r in db.successful_recipes()}
+    planned = {m["recipe_id"] for m in meals}
+
+    seen: set[tuple[str, str]] = set()
+    for row in items:
+        name = row["ingredient_name"]
+
+        if row["resolution_status"] != "pending":
+            fail(f"{name}: status is {row['resolution_status']}, stage 5 only "
+                 f"picks up 'pending'")
+        if row["quantity_needed"] is None or float(row["quantity_needed"]) <= 0:
+            fail(f"{name}: quantity_needed is {row['quantity_needed']}")
+        if not row["unit"]:
+            fail(f"{name}: no unit")
+        if _is_non_food(name):
+            fail(f"{name}: non-food reached the cart")
+
+        key = (name, row["unit"])
+        if key in seen:
+            fail(f"{name} ({row['unit']}): duplicated - violates the "
+                 f"(week, name, unit) unique constraint")
+        seen.add(key)
+
+    # Everything on the list must come from a recipe that's actually planned.
+    wanted = {
+        ing["name"]
+        for rid in planned
+        for ing in by_recipe.get(rid, {}).get("ingredients", [])
+    }
+    for row in items:
+        if row["ingredient_name"] not in wanted:
+            fail(f"{row['ingredient_name']}: on the cart but in no planned recipe")
+
+    # The whole point of the stage: the cart is the gap, not the recipe.
+    distinct_wanted = len({n for n in wanted if not _is_non_food(n)})
+    if len(items) >= distinct_wanted:
+        fail(f"{len(items)} items for {distinct_wanted} ingredients - the pantry "
+             f"subtracted nothing, so the demo has no story")
+    print(f"      {len(items)} to buy out of {distinct_wanted} ingredients "
+          f"across {len(meals)} meals - pantry covered the rest")
+
+    stages_logged = {row["stage"] for row in db.select("eval_log")}
+    if "shopping_list" not in stages_logged:
+        fail("eval_log has no 'shopping_list' rows")
 
 
 def check_handoff(recipes: list[dict], slots: list[dict],
@@ -373,6 +442,8 @@ def cleanup() -> None:
     db.delete_where("eval_log", input_ref=INPUT_REF)
     db.delete_where("eval_log", stage="availability")
     db.delete_where("eval_log", stage="planning")
+    db.delete_where("eval_log", stage="shopping_list")
+    db.delete_where("shopping_list", week_start_date=config.week_start().isoformat())
     print("  cleaned up test rows")
 
 
@@ -389,7 +460,7 @@ def main() -> None:
 
     started = datetime.now()
     mode = " (fixtures)" if args.fixtures else ""
-    print(f"integration: stages 1-3{mode}, week of {config.week_start()}")
+    print(f"integration: stages 1-4{mode}, week of {config.week_start()}")
     print()
 
     cleanup()   # start from a known state, not yesterday's leftovers
@@ -409,6 +480,10 @@ def main() -> None:
     meals = run_stage_3(use_llm=not args.fixtures)
     print()
     check_plan_invariants(meals, slots, recipes)
+    print()
+    items = run_stage_4()
+    print()
+    check_shopping_invariants(items, meals, recipes)
     show_sample(recipes)
 
     print()
@@ -417,7 +492,7 @@ def main() -> None:
 
     if args.keep:
         print(f"  kept {len(recipes)} recipes, {len(slots)} cook_slots, "
-              f"{len(meals)} meals")
+              f"{len(meals)} meals, {len(items)} shopping items")
     else:
         cleanup()
 

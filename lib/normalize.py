@@ -435,6 +435,68 @@ def dedupe_ingredients(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(merged.values())
 
 
+# --- dimensions -------------------------------------------------------------
+#
+# Stage 4 consolidates a week of ingredients. "2 cup" and "100 ml" of the same
+# thing are the same purchase and must merge; "3 tbsp butter" and "250 g
+# butter" are NOT, because volume-to-mass depends on the ingredient. So we
+# convert freely WITHIN a dimension and never across one.
+#
+# Volume factors are US customary.
+_DIMENSIONS: dict[str, tuple[str, float]] = {
+    "g": ("mass", 1.0),
+    "kg": ("mass", 1000.0),
+    "ml": ("volume", 1.0),
+    "l": ("volume", 1000.0),
+    "cup": ("volume", 236.588),
+    "tbsp": ("volume", 14.7868),
+    "tsp": ("volume", 4.92892),
+    "unit": ("count", 1.0),
+}
+
+BASE_UNIT = {"mass": "g", "volume": "ml", "count": "unit"}
+
+
+def dimension_of(unit: str | None) -> str:
+    """'mass' | 'volume' | 'count'. Unknown units are treated as countable."""
+    return _DIMENSIONS.get(normalize_unit(unit), ("count", 1.0))[0]
+
+
+def same_dimension(a: str | None, b: str | None) -> bool:
+    return dimension_of(a) == dimension_of(b)
+
+
+def to_base_unit(qty: float | None, unit: str | None) -> tuple[float | None, str]:
+    """Convert onto the dimension's base unit: g, ml, or unit."""
+    clean = normalize_unit(unit)
+    _dim, factor = _DIMENSIONS.get(clean, ("count", 1.0))
+    return (round(qty * factor, 4) if qty is not None else None), BASE_UNIT[_dim]
+
+
+def base_to_unit(qty_base: float | None, unit: str | None) -> tuple[float | None, str]:
+    """Convert a base amount back into a specific unit: 4.93 ml -> 1 tsp.
+
+    Used so a shopping list reads "1 tsp turmeric" rather than "4.93 ml" —
+    nobody buys spices by millilitre.
+    """
+    clean = normalize_unit(unit)
+    _dim, factor = _DIMENSIONS.get(clean, ("count", 1.0))
+    if qty_base is None or not factor:
+        return None, clean
+    return round(qty_base / factor, 2), clean
+
+
+def from_base_unit(qty: float | None, base: str) -> tuple[float | None, str]:
+    """Scale a base amount back up for display: 1500 g -> 1.5 kg."""
+    if qty is None:
+        return None, base
+    if base == "g" and qty >= 1000:
+        return round(qty / 1000, 2), "kg"
+    if base == "ml" and qty >= 1000:
+        return round(qty / 1000, 2), "l"
+    return round(qty, 2), base
+
+
 MAX_SOURCE_CHARS = 12000
 
 
@@ -614,6 +676,36 @@ if __name__ == "__main__":
         to_ingredient_row("Salt", None, None, qualitative_note="a pinch"),
     ])
     assert len(merged) == 1 and merged[0]["is_approximate"]
+
+    # --- dimensions --------------------------------------------------------
+    assert dimension_of("g") == "mass" and dimension_of("kg") == "mass"
+    assert dimension_of("cup") == "volume" and dimension_of("tsp") == "volume"
+    assert dimension_of("unit") == "count"
+    assert dimension_of("smidgen") == "count", "unknown units are countable"
+    assert same_dimension("kg", "g") and same_dimension("cup", "ml")
+    assert not same_dimension("g", "cup"), "mass and volume never mix"
+
+    assert to_base_unit(2, "kg") == (2000.0, "g")
+    assert to_base_unit(1, "l") == (1000.0, "ml")
+    assert to_base_unit(1, "cup") == (236.588, "ml")
+    assert to_base_unit(3, "tbsp") == (44.3604, "ml")
+    assert to_base_unit(None, "kg") == (None, "g")
+    assert to_base_unit(2, "unit") == (2.0, "unit")
+
+    assert from_base_unit(1500, "g") == (1.5, "kg")
+    assert from_base_unit(250, "g") == (250.0, "g")
+    assert from_base_unit(1000, "ml") == (1.0, "l")
+    assert from_base_unit(None, "g") == (None, "g")
+
+    assert base_to_unit(4.92892, "tsp") == (1.0, "tsp")
+    assert base_to_unit(44.3604, "tbsp") == (3.0, "tbsp")
+    assert base_to_unit(473.176, "cup") == (2.0, "cup")
+    assert base_to_unit(2000, "kg") == (2.0, "kg")
+    assert base_to_unit(None, "tsp") == (None, "tsp")
+
+    # round trip within a dimension
+    qty, base = to_base_unit(2, "cup")
+    assert abs(qty - 473.176) < 0.01
 
     # --- source text guard -------------------------------------------------
     assert clean_source_text("  hello   world  ") == "hello world"
