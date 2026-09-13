@@ -434,7 +434,8 @@ voice agent greets you by recipe name.
 
 ```bash
 brew install ffmpeg      # macOS; required only for local Whisper transcription
-python3 -m venv .venv
+brew install python@3.11 # local Whisper/PyTorch does not yet support Python 3.14
+python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env     # fill Supabase, META_VERIFY_TOKEN, and other credentials
